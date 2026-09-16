@@ -14,6 +14,8 @@ import type {
   Thenable,
   RejectedThenable,
   Awaited,
+  ReactStore,
+  StoreVersion,
 } from 'shared/ReactTypes';
 import type {
   Fiber,
@@ -43,11 +45,13 @@ import {
   enableNoCloningMemoCache,
   enableViewTransition,
   enableGestureTransition,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import {
   REACT_CONTEXT_TYPE,
   REACT_RECOVERABLE_TYPE,
   REACT_MEMO_CACHE_SENTINEL,
+  REACT_STORE_TYPE,
 } from 'shared/ReactSymbols';
 
 import {
@@ -68,6 +72,7 @@ import {
   mergeLanes,
   removeLanes,
   intersectLanes,
+  getHighestPriorityLane,
   isTransitionLane,
   markRootEntangled,
   includesSomeLane,
@@ -161,6 +166,11 @@ import {isCurrentTreeHidden} from './ReactFiberHiddenContext';
 import {requestCurrentTransition} from './ReactFiberTransition';
 
 import {callComponentInDEV} from './ReactFiberCallUserSpace';
+import {
+  getStoreVersion,
+  getPendingStoreLanes,
+  markStoreRootBehind,
+} from './ReactFiberStore';
 
 import {scheduleGesture} from './ReactFiberGestureScheduler';
 
@@ -1877,7 +1887,7 @@ function updateStoreInstance<T>(
     // Force a re-render.
     // We intentionally don't log update times and stacks here because this
     // was not an external trigger but rather an internal one.
-    forceStoreRerender(fiber);
+    forceStoreRerender(fiber, SyncLane);
   }
 }
 
@@ -1892,7 +1902,7 @@ function subscribeToStore<T>(
     if (checkIfSnapshotChanged(inst)) {
       // Force a re-render.
       startUpdateTimerByLane(SyncLane, 'updateSyncExternalStore()', fiber);
-      forceStoreRerender(fiber);
+      forceStoreRerender(fiber, SyncLane);
     }
   };
   // Subscribe to the store and return a clean-up function.
@@ -1910,10 +1920,216 @@ function checkIfSnapshotChanged<T>(inst: StoreInstance<T>): boolean {
   }
 }
 
-function forceStoreRerender(fiber: Fiber) {
-  const root = enqueueConcurrentRenderForLane(fiber, SyncLane);
+function forceStoreRerender(fiber: Fiber, lane: Lane): FiberRoot | null {
+  const root = enqueueConcurrentRenderForLane(fiber, lane);
   if (root !== null) {
-    scheduleUpdateOnFiber(root, fiber, SyncLane);
+    scheduleUpdateOnFiber(root, fiber, lane);
+  }
+  return root;
+}
+
+type StoreReader<S, T> = {
+  store: ReactStore<S, mixed>,
+  root: FiberRoot,
+  // Updated in the layout phase.
+  selector: (state: S, previous: T | void) => T,
+  value: T,
+};
+
+function selectState<S>(state: S): S {
+  return state;
+}
+
+function mountStore<S, T>(
+  store: ReactStore<S, mixed>,
+  selector?: (state: S, previous: T | void) => T,
+): S | T {
+  const hook = mountWorkInProgressHook();
+  return renderStore(hook, null, store, selector);
+}
+
+function updateStore<S, T>(
+  store: ReactStore<S, mixed>,
+  selector?: (state: S, previous: T | void) => T,
+): S | T {
+  const hook = updateWorkInProgressHook();
+  const inst: StoreReader<S, T> = hook.queue;
+  return renderStore(hook, inst.store === store ? inst : null, store, selector);
+}
+
+function renderStore<S, T>(
+  hook: Hook,
+  prevInst: StoreReader<S, T> | null,
+  store: ReactStore<S, mixed>,
+  selector: void | ((state: S, previous: T | void) => T),
+): S | T {
+  const fiber = currentlyRenderingFiber;
+  let inst = prevInst;
+  if (inst === null) {
+    // Mounting, or reading a different store: start a fresh selection.
+    if (__DEV__) {
+      const maybeStore: mixed = store;
+      if (
+        maybeStore === null ||
+        typeof maybeStore !== 'object' ||
+        maybeStore.$$typeof !== REACT_STORE_TYPE
+      ) {
+        console.error('useStore expects a store created by createStore.');
+      }
+    }
+    const root = getWorkInProgressRoot();
+    if (root === null) {
+      throw new Error(
+        'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
+      );
+    }
+    inst = {store, root, selector: null as any, value: null as any};
+    hook.queue = inst;
+  }
+  const root = inst.root;
+  const actualSelector: (state: S, previous: T | void) => T =
+    selector === undefined ? (selectState as any) : selector;
+  const isHydrating = getIsHydrating();
+  const version = isHydrating
+    ? // The client store must be created from the state the server rendered.
+      store._initial
+    : readStoreVersion(fiber, store, root, renderLanes);
+  const previous: T | void = prevInst === null ? undefined : hook.memoizedState;
+  const value = actualSelector(version.state, previous);
+  if (prevInst === null || !is(previous, value)) {
+    hook.memoizedState = value;
+    markWorkInProgressReceivedUpdate();
+  }
+
+  if (!isHydrating) {
+    // Like a skipped update: a render that does not include the root's pending
+    // Transition toward the latest state leaves that work on the fiber.
+    const skippedLanes = removeLanes(
+      getPendingStoreLanes(store, root),
+      renderLanes,
+    );
+    if (skippedLanes !== NoLanes && version !== store._head) {
+      fiber.lanes = mergeLanes(fiber.lanes, skippedLanes);
+      markSkippedUpdateLanes(skippedLanes);
+    }
+    if (!includesBlockingLane(renderLanes)) {
+      const lanes = renderLanes;
+      pushStoreConsistencyCheck(
+        fiber,
+        () => readStoreVersion(fiber, store, root, lanes),
+        version,
+      );
+    }
+  }
+
+  const subscribe = subscribeToReactStore.bind(null, fiber, inst, store);
+  if (currentHook === null) {
+    mountLayoutEffect(subscribe, [store]);
+  } else {
+    updateLayoutEffect(subscribe, [store]);
+  }
+  const instanceChanged =
+    inst.selector !== actualSelector || !is(inst.value, value);
+  // Always in the effect list, so that revealing a hidden Activity tree checks
+  // for actions dispatched while it was hidden.
+  pushSimpleEffect(
+    instanceChanged ? HookHasEffect | HookLayout : HookLayout,
+    createEffectInstance(),
+    updateStoreReader.bind(null, fiber, inst, actualSelector, value),
+    null,
+  );
+  if (instanceChanged) {
+    fiber.flags |= UpdateEffect;
+  }
+  return value;
+}
+
+function readStoreVersion<S>(
+  fiber: Fiber,
+  store: ReactStore<S, mixed>,
+  root: FiberRoot,
+  lanes: Lanes,
+): StoreVersion<S> {
+  // A legacy root renders every update synchronously.
+  return (fiber.mode & ConcurrentMode) === NoMode
+    ? store._head
+    : getStoreVersion(store, root, lanes);
+}
+
+function updateStoreReader<S, T>(
+  fiber: Fiber,
+  inst: StoreReader<S, T>,
+  selector: (state: S, previous: T | void) => T,
+  value: T,
+): void {
+  inst.selector = selector;
+  inst.value = value;
+  // An action may have been dispatched between render and now.
+  handleStoreReaderChange(fiber, inst, false, SyncLane);
+}
+
+function subscribeToReactStore<S, T>(
+  fiber: Fiber,
+  inst: StoreReader<S, T>,
+  store: ReactStore<S, mixed>,
+): () => void {
+  const onStoreChange = (isTransition: boolean, lane?: Lane) =>
+    handleStoreReaderChange(
+      fiber,
+      inst,
+      isTransition,
+      lane === undefined ? requestUpdateLane(fiber) : lane,
+    );
+  store._readers.add(onStoreChange);
+  return () => {
+    store._readers.delete(onStoreChange);
+  };
+}
+
+function handleStoreReaderChange<S, T>(
+  fiber: Fiber,
+  inst: StoreReader<S, T>,
+  isTransition: boolean,
+  lane: Lane,
+): void {
+  const store = inst.store;
+  const head = store._head;
+  if (isTransitionLane(lane)) {
+    if (!isStoreSelectionEqual(inst, head)) {
+      startUpdateTimerByLane(lane, 'store.dispatch()', fiber);
+      const root = forceStoreRerender(fiber, lane);
+      if (root !== null) {
+        markStoreRootBehind(store, root, lane);
+      }
+    }
+    return;
+  }
+  // A Transition this fiber cannot render as one shows every action.
+  const version = isTransition
+    ? head
+    : readStoreVersion(fiber, store, inst.root, NoLanes);
+  if (!isStoreSelectionEqual(inst, version)) {
+    startUpdateTimerByLane(lane, 'store.dispatch()', fiber);
+    forceStoreRerender(fiber, lane);
+  }
+  if (version !== head && !isStoreSelectionEqual(inst, head)) {
+    // Render with the root's pending Transition toward the latest state.
+    const pendingLanes = getPendingStoreLanes(store, inst.root);
+    if (pendingLanes !== NoLanes) {
+      forceStoreRerender(fiber, getHighestPriorityLane(pendingLanes));
+    }
+  }
+}
+
+function isStoreSelectionEqual<S, T>(
+  inst: StoreReader<S, T>,
+  version: StoreVersion<S>,
+): boolean {
+  try {
+    return is(inst.selector(version.state, inst.value), inst.value);
+  } catch (error) {
+    // Render calls the selector again and throws there.
+    return false;
   }
 }
 
@@ -3922,6 +4138,9 @@ export const ContextOnlyDispatcher: Dispatcher = {
   useCacheRefresh: throwInvalidHookError,
   useEffectEvent: throwInvalidHookError,
 };
+if (enableStore) {
+  ContextOnlyDispatcher.useStore = throwInvalidHookError;
+}
 
 const HooksDispatcherOnMount: Dispatcher = {
   readContext,
@@ -3950,6 +4169,9 @@ const HooksDispatcherOnMount: Dispatcher = {
   useCacheRefresh: mountRefresh,
   useEffectEvent: mountEvent,
 };
+if (enableStore) {
+  HooksDispatcherOnMount.useStore = mountStore;
+}
 
 const HooksDispatcherOnUpdate: Dispatcher = {
   readContext,
@@ -3978,6 +4200,9 @@ const HooksDispatcherOnUpdate: Dispatcher = {
   useCacheRefresh: updateRefresh,
   useEffectEvent: updateEvent,
 };
+if (enableStore) {
+  HooksDispatcherOnUpdate.useStore = updateStore;
+}
 
 const HooksDispatcherOnRerender: Dispatcher = {
   readContext,
@@ -4006,6 +4231,9 @@ const HooksDispatcherOnRerender: Dispatcher = {
   useCacheRefresh: updateRefresh,
   useEffectEvent: updateEvent,
 };
+if (enableStore) {
+  HooksDispatcherOnRerender.useStore = updateStore;
+}
 
 let HooksDispatcherOnMountInDEV: Dispatcher | null = null;
 let HooksDispatcherOnMountWithHookTypesInDEV: Dispatcher | null = null;
@@ -4203,6 +4431,19 @@ if (__DEV__) {
       return mountEvent(callback);
     },
   };
+  if (enableStore) {
+    (HooksDispatcherOnMountInDEV as Dispatcher).useStore = function useStore<
+      S,
+      T,
+    >(
+      store: ReactStore<S, mixed>,
+      selector?: (state: S, previous: T | void) => T,
+    ): S | T {
+      currentHookNameInDev = 'useStore';
+      mountHookTypesDev();
+      return mountStore(store, selector);
+    };
+  }
 
   HooksDispatcherOnMountWithHookTypesInDEV = {
     readContext<T>(context: ReactContext<T>): T {
@@ -4367,6 +4608,17 @@ if (__DEV__) {
       return mountEvent(callback);
     },
   };
+  if (enableStore) {
+    (HooksDispatcherOnMountWithHookTypesInDEV as Dispatcher).useStore =
+      function useStore<S, T>(
+        store: ReactStore<S, mixed>,
+        selector?: (state: S, previous: T | void) => T,
+      ): S | T {
+        currentHookNameInDev = 'useStore';
+        updateHookTypesDev();
+        return mountStore(store, selector);
+      };
+  }
 
   HooksDispatcherOnUpdateInDEV = {
     readContext<T>(context: ReactContext<T>): T {
@@ -4531,6 +4783,19 @@ if (__DEV__) {
       return updateEvent(callback);
     },
   };
+  if (enableStore) {
+    (HooksDispatcherOnUpdateInDEV as Dispatcher).useStore = function useStore<
+      S,
+      T,
+    >(
+      store: ReactStore<S, mixed>,
+      selector?: (state: S, previous: T | void) => T,
+    ): S | T {
+      currentHookNameInDev = 'useStore';
+      updateHookTypesDev();
+      return updateStore(store, selector);
+    };
+  }
 
   HooksDispatcherOnRerenderInDEV = {
     readContext<T>(context: ReactContext<T>): T {
@@ -4695,6 +4960,19 @@ if (__DEV__) {
       return updateEvent(callback);
     },
   };
+  if (enableStore) {
+    (HooksDispatcherOnRerenderInDEV as Dispatcher).useStore = function useStore<
+      S,
+      T,
+    >(
+      store: ReactStore<S, mixed>,
+      selector?: (state: S, previous: T | void) => T,
+    ): S | T {
+      currentHookNameInDev = 'useStore';
+      updateHookTypesDev();
+      return updateStore(store, selector);
+    };
+  }
 
   InvalidNestedHooksDispatcherOnMountInDEV = {
     readContext<T>(context: ReactContext<T>): T {
@@ -4884,6 +5162,18 @@ if (__DEV__) {
       return mountEvent(callback);
     },
   };
+  if (enableStore) {
+    (InvalidNestedHooksDispatcherOnMountInDEV as Dispatcher).useStore =
+      function useStore<S, T>(
+        store: ReactStore<S, mixed>,
+        selector?: (state: S, previous: T | void) => T,
+      ): S | T {
+        currentHookNameInDev = 'useStore';
+        warnInvalidHookAccess();
+        mountHookTypesDev();
+        return mountStore(store, selector);
+      };
+  }
 
   InvalidNestedHooksDispatcherOnUpdateInDEV = {
     readContext<T>(context: ReactContext<T>): T {
@@ -5073,6 +5363,18 @@ if (__DEV__) {
       return updateEvent(callback);
     },
   };
+  if (enableStore) {
+    (InvalidNestedHooksDispatcherOnUpdateInDEV as Dispatcher).useStore =
+      function useStore<S, T>(
+        store: ReactStore<S, mixed>,
+        selector?: (state: S, previous: T | void) => T,
+      ): S | T {
+        currentHookNameInDev = 'useStore';
+        warnInvalidHookAccess();
+        updateHookTypesDev();
+        return updateStore(store, selector);
+      };
+  }
 
   InvalidNestedHooksDispatcherOnRerenderInDEV = {
     readContext<T>(context: ReactContext<T>): T {
@@ -5262,4 +5564,16 @@ if (__DEV__) {
       return updateEvent(callback);
     },
   };
+  if (enableStore) {
+    (InvalidNestedHooksDispatcherOnRerenderInDEV as Dispatcher).useStore =
+      function useStore<S, T>(
+        store: ReactStore<S, mixed>,
+        selector?: (state: S, previous: T | void) => T,
+      ): S | T {
+        currentHookNameInDev = 'useStore';
+        warnInvalidHookAccess();
+        updateHookTypesDev();
+        return updateStore(store, selector);
+      };
+  }
 }

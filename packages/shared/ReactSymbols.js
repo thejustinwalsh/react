@@ -42,6 +42,8 @@ export const REACT_MEMO_CACHE_SENTINEL: symbol = Symbol.for(
   'react.memo_cache_sentinel',
 );
 
+export const REACT_STORE_TYPE: symbol = Symbol.for('react.store');
+
 export const REACT_VIEW_TRANSITION_TYPE: symbol = Symbol.for(
   'react.view_transition',
 );

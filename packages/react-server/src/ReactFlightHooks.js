@@ -85,6 +85,7 @@ export const HooksDispatcher: Dispatcher = {
   useDeferredValue: unsupportedHook as any,
   useTransition: unsupportedHook as any,
   useSyncExternalStore: unsupportedHook as any,
+  useStore: unsupportedHook as any,
   useId,
   useHostTransitionStatus: unsupportedHook as any,
   useFormState: unsupportedHook as any,

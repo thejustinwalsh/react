@@ -70,6 +70,30 @@ export type ReactContext<T> = {
   displayName?: string,
 };
 
+export type StoreVersion<S> = {
+  state: S,
+};
+
+export type ReactStore<S, A> = {
+  $$typeof: symbol | number,
+  getState(): S,
+  dispatch(action: A): void,
+  subscribe(callback: (action: A) => void): () => void,
+  _initial: StoreVersion<S>,
+  // Every action, in the order dispatched.
+  _head: StoreVersion<S>,
+  // What a root that has not shown a pending Transition shows. The same object
+  // as _head when no Transition is pending.
+  _sync: StoreVersion<S>,
+  // Notified synchronously after each dispatch. The lane is only passed when
+  // React schedules the reader itself.
+  _readers: Set<(isTransition: boolean, lane?: number) => void>,
+  // Keyed by FiberRoot, while a Transition is pending: the lanes a root has not
+  // yet committed it at, or no lanes once it has.
+  _roots: Map<mixed, number>,
+  _rootsBehind: number,
+};
+
 export type ReactPortal = {
   $$typeof: symbol | number,
   key: ReactKey,

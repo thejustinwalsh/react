@@ -18,6 +18,7 @@ import type {
   ReactComponentInfo,
   ReactDebugInfo,
   ReactKey,
+  ReactStore,
 } from 'shared/ReactTypes';
 import type {TransitionTypes} from 'react/src/ReactTransitionType';
 import type {WorkTag} from './ReactWorkTags';
@@ -59,6 +60,7 @@ export type HookType =
   | 'useDeferredValue'
   | 'useTransition'
   | 'useSyncExternalStore'
+  | 'useStore'
   | 'useId'
   | 'useCacheRefresh'
   | 'useOptimistic'
@@ -436,6 +438,11 @@ export type Dispatcher = {
     getSnapshot: () => T,
     getServerSnapshot?: () => T,
   ): T,
+  // TODO: Non-nullable once `enableStore` is on everywhere.
+  useStore?: <S, T>(
+    store: ReactStore<S, mixed>,
+    selector?: (state: S, previous: T | void) => T,
+  ) => S | T,
   useId(): string,
   useCacheRefresh: () => <T>(?() => T, ?T) => void,
   useMemoCache: (size: number) => Array<any>,

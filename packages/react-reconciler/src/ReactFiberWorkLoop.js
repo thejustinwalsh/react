@@ -60,6 +60,7 @@ import {
   enableGestureTransition,
   enableDefaultTransitionIndicator,
   enableParallelTransitions,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import {resetOwnerStackLimit} from 'shared/ReactOwnerStackReset';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
@@ -228,6 +229,7 @@ import {
   eventPriorityToLane,
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
+import {commitStoreRoots} from './ReactFiberStore';
 import {
   SelectiveHydrationException,
   beginWork,
@@ -4132,6 +4134,12 @@ function flushLayoutEffects(): void {
       setCurrentUpdatePriority(previousPriority);
       ReactSharedInternals.T = prevTransition;
     }
+  }
+
+  if (enableStore) {
+    // After layout effects, so readers in this root have published what they
+    // committed.
+    commitStoreRoots(root);
   }
 
   const completedRenderEndTime = pendingEffectsRenderEndTime;

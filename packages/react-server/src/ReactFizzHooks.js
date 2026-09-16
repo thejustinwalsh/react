@@ -17,6 +17,7 @@ import type {
   ReactRecoverable,
   ReactCustomFormAction,
   Awaited,
+  ReactStore,
 } from 'shared/ReactTypes';
 
 import type {ResumableState} from './ReactFizzConfig';
@@ -39,6 +40,7 @@ import {
 } from './ReactFizzConfig';
 import {createFastHash} from './ReactServerStreamConfig';
 
+import {enableStore} from 'shared/ReactFeatureFlags';
 import is from 'shared/objectIs';
 import hasOwnProperty from 'shared/hasOwnProperty';
 import {
@@ -633,6 +635,15 @@ function useSyncExternalStore<T>(
   return getServerSnapshot();
 }
 
+function useStore<S, T>(
+  store: ReactStore<S, mixed>,
+  selector?: (state: S, previous: T | void) => T,
+): S | T {
+  resolveCurrentlyRenderingComponent();
+  const state = store.getState();
+  return selector === undefined ? state : selector(state, undefined);
+}
+
 function useDeferredValue<T>(value: T, initialValue?: T): T {
   resolveCurrentlyRenderingComponent();
   return initialValue !== undefined ? initialValue : value;
@@ -938,6 +949,13 @@ export const HooksDispatcher: Dispatcher = supportsClientAPIs
       useCacheRefresh,
       useEffectEvent,
     };
+
+if (enableStore) {
+  // $FlowFixMe[constant-condition]
+  HooksDispatcher.useStore = supportsClientAPIs
+    ? useStore
+    : clientHookNotSupported;
+}
 
 export let currentResumableState: null | ResumableState = null as any;
 export function setCurrentResumableState(

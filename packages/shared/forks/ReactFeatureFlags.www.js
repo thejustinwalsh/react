@@ -116,6 +116,7 @@ export const ownerStackLimit = 1e4;
 export const enableFragmentRefsInstanceHandles: boolean = true;
 
 export const enableOptimisticKey: boolean = false;
+export const enableStore: boolean = false;
 
 // These flags are only used by eslint-plugin-react-hooks, which has its own
 // fork at ReactFeatureFlags.eslint-plugin.www.js with the www-specific values.
