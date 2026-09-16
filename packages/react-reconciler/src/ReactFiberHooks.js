@@ -2081,8 +2081,15 @@ function subscribeToReactStore<S, T>(
       lane === undefined ? requestUpdateLane(fiber) : lane,
     );
   store._readers.add(onStoreChange);
+  const isStrict = __DEV__ && (fiber.mode & StrictLegacyMode) !== NoMode;
+  if (isStrict) {
+    store._strictReaders++;
+  }
   return () => {
     store._readers.delete(onStoreChange);
+    if (isStrict) {
+      store._strictReaders--;
+    }
   };
 }
 

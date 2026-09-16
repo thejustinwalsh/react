@@ -92,6 +92,8 @@ export type ReactStore<S, A> = {
   // yet committed it at, or no lanes once it has.
   _roots: Map<mixed, number>,
   _rootsBehind: number,
+  // DEV only: readers rendered inside StrictMode.
+  _strictReaders: number,
 };
 
 export type ReactPortal = {

@@ -759,4 +759,46 @@ describe('useStore', () => {
     await act(() => root.render(<App />));
     assertLog(['1']);
   });
+
+  // @gate enableStore
+  it('calls the reducer twice in development when a reader is in StrictMode', async () => {
+    let calls = 0;
+    const reducer = (n, by) => {
+      calls++;
+      return n + by;
+    };
+    function Reader({store}) {
+      return <Text text={String(useStore(store))} />;
+    }
+
+    const strictStore = createStore(0, reducer);
+    const strictRoot = ReactNoop.createRoot();
+    await act(() =>
+      strictRoot.render(
+        <React.StrictMode>
+          <Reader store={strictStore} />
+        </React.StrictMode>,
+      ),
+    );
+    Scheduler.unstable_clearLog();
+    await act(() => strictStore.dispatch(1));
+    Scheduler.unstable_clearLog();
+    expect(calls).toBe(__DEV__ ? 2 : 1);
+    expect(strictStore.getState()).toBe(1);
+
+    calls = 0;
+    const store = createStore(0, reducer);
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<Reader store={store} />));
+    assertLog(['0']);
+    await act(() => store.dispatch(1));
+    assertLog(['1']);
+    expect(calls).toBe(1);
+
+    // Once the StrictMode reader unmounts, the store no longer double-invokes.
+    await act(() => strictRoot.render(null));
+    calls = 0;
+    await act(() => strictStore.dispatch(1));
+    expect(calls).toBe(1);
+  });
 });

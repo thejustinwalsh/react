@@ -32,6 +32,14 @@ export function createStore<S, A>(
   const actualReducer: (S, A) => S =
     reducer === undefined ? (basicStateReducer as any) : reducer;
   const initial: StoreVersion<S> = {state: initialState};
+  const reduce = (state: S, action: A): S => {
+    if (__DEV__ && store._strictReaders > 0) {
+      // Like StrictMode does for useReducer, surface an impure reducer by
+      // calling it twice.
+      actualReducer(state, action);
+    }
+    return actualReducer(state, action);
+  };
   const subscriptions: Set<(action: A) => void> = new Set();
   const store: ReactStore<S, A> = {
     $$typeof: REACT_STORE_TYPE,
@@ -43,7 +51,7 @@ export function createStore<S, A>(
       const sync = store._sync;
       const isTransition = ReactSharedInternals.T !== null;
 
-      const headState = actualReducer(head.state, action);
+      const headState = reduce(head.state, action);
       const nextHead: StoreVersion<S> = is(headState, head.state)
         ? head
         : {state: headState};
@@ -55,7 +63,7 @@ export function createStore<S, A>(
         if (sync === head) {
           nextSync = nextHead;
         } else {
-          const syncState = actualReducer(sync.state, action);
+          const syncState = reduce(sync.state, action);
           if (!is(syncState, sync.state)) {
             nextSync = {state: syncState};
           }
@@ -90,6 +98,7 @@ export function createStore<S, A>(
     _readers: new Set(),
     _roots: new Map(),
     _rootsBehind: 0,
+    _strictReaders: 0,
   };
   return store;
 }
