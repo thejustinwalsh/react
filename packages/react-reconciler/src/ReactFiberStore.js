@@ -311,17 +311,10 @@ function getPendingTransitionLanes<S, A>(
 function compactStoreEntries<S, A>(internals: StoreInternals<S, A>): void {
   const entries = internals.entries;
   let count = 0;
-  while (count < entries.length) {
-    const entry = entries[count];
-    let isShownEverywhere = true;
-    internals.roots.forEach((readers, root) => {
-      if (!isStoreEntryVisible(entry, root, NoLanes)) {
-        isShownEverywhere = false;
-      }
-    });
-    if (!isShownEverywhere) {
-      break;
-    }
+  while (
+    count < entries.length &&
+    isStoreEntryShownEverywhere(internals, entries[count])
+  ) {
     count++;
   }
   if (count > 0) {
@@ -336,6 +329,19 @@ function compactStoreEntries<S, A>(internals: StoreInternals<S, A>): void {
   if (internals.readers.size === 0 && entries.length === 0) {
     internals.store._listeners.delete(internals.onDispatch);
   }
+}
+
+function isStoreEntryShownEverywhere<S, A>(
+  internals: StoreInternals<S, A>,
+  entry: StoreEntry<S, A>,
+): boolean {
+  const roots = Array.from(internals.roots.keys());
+  for (let i = 0; i < roots.length; i++) {
+    if (!isStoreEntryVisible(entry, roots[i], NoLanes)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function hasPendingStoreEntries<S, A>(
