@@ -268,9 +268,8 @@ describe('useStore', () => {
     expect(root).toMatchRenderedOutput('homecount:0');
 
     // Applied to the state on screen now, and after the Transition's update.
-    // Page has a pending update, so like useState it renders to rebase it.
     await act(() => store.dispatch(s => ({...s, count: s.count + 1})));
-    assertLog(['home', 'count:1', 'Loading']);
+    assertLog(['count:1', 'Loading']);
     expect(root).toMatchRenderedOutput('homecount:1');
 
     await act(() => resolveText('about'));
@@ -778,6 +777,33 @@ describe('useStore', () => {
     assertLog([]);
     await act(() => second.dispatch(s => ({...s, a: 1})));
     assertLog(['a=1']);
+  });
+
+  // @gate enableStore
+  it('does not commit a reader for a change it does not select', async () => {
+    const store = createStore({unread: 0, theme: 'dark'});
+    let commits = 0;
+    function Unread() {
+      const unread = useStore(store, s => s.unread);
+      React.useEffect(() => {
+        commits++;
+      });
+      return <Text text={'unread:' + unread} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<Unread />));
+    assertLog(['unread:0']);
+    await act(() => store.dispatch(s => ({...s, unread: 1})));
+    assertLog(['unread:1']);
+    expect(commits).toBe(2);
+
+    // The reader may render to find out, but it does not commit.
+    await act(() => store.dispatch(s => ({...s, theme: 'light'})));
+    Scheduler.unstable_clearLog();
+    expect(commits).toBe(2);
+    await act(() => store.dispatch(s => ({...s, theme: 'dark'})));
+    Scheduler.unstable_clearLog();
+    expect(commits).toBe(2);
   });
 
   // @gate enableStore

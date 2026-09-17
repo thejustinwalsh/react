@@ -122,6 +122,7 @@ import isArray from 'shared/isArray';
 import {
   markWorkInProgressReceivedUpdate,
   checkIfWorkInProgressReceivedUpdate,
+  resetWorkInProgressReceivedUpdate,
 } from './ReactFiberBeginWork';
 import {
   getIsHydrating,
@@ -2048,6 +2049,7 @@ function updateStore<S, T>(
   const actualSelector: (state: S, previous: T | void) => T =
     selector === undefined ? (selectState as any) : selector;
 
+  const didReceiveUpdateBefore = checkIfWorkInProgressReceivedUpdate();
   let state: S;
   // The version the state was read from, if it was not reduced from the queue.
   let version: StoreVersion<S> | null = null;
@@ -2096,6 +2098,10 @@ function updateStore<S, T>(
   const value = actualSelector(state, previous);
   if (!is(value, previous)) {
     markWorkInProgressReceivedUpdate();
+  } else if (!didReceiveUpdateBefore && reader.store === store) {
+    // The queue marks an update when the state changes. What this reader
+    // selects did not, so the fiber can still bail out.
+    resetWorkInProgressReceivedUpdate();
   }
   readerHook.memoizedState = value;
   if (reader.store !== store) {

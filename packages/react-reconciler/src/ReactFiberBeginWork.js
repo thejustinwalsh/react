@@ -3807,6 +3807,10 @@ export function checkIfWorkInProgressReceivedUpdate(): boolean {
   return didReceiveUpdate;
 }
 
+export function resetWorkInProgressReceivedUpdate() {
+  didReceiveUpdate = false;
+}
+
 function resetSuspendedCurrentOnMountInLegacyMode(
   current: null | Fiber,
   workInProgress: Fiber,
