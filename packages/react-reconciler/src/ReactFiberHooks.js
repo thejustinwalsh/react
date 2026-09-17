@@ -15,6 +15,7 @@ import type {
   RejectedThenable,
   Awaited,
   ReactStore,
+  StoreUpdate,
   StoreVersion,
 } from 'shared/ReactTypes';
 import type {
@@ -173,6 +174,7 @@ import {callComponentInDEV} from './ReactFiberCallUserSpace';
 import {
   getStoreVersion,
   getPendingStoreLanes,
+  markStoreRootBehind,
   queueTransitionStores,
 } from './ReactFiberStore';
 
@@ -1894,7 +1896,7 @@ function updateStoreInstance<T>(
     // Force a re-render.
     // We intentionally don't log update times and stacks here because this
     // was not an external trigger but rather an internal one.
-    forceStoreRerender(fiber, SyncLane);
+    forceStoreRerender(fiber);
   }
 }
 
@@ -1909,7 +1911,7 @@ function subscribeToStore<T>(
     if (checkIfSnapshotChanged(inst)) {
       // Force a re-render.
       startUpdateTimerByLane(SyncLane, 'updateSyncExternalStore()', fiber);
-      forceStoreRerender(fiber, SyncLane);
+      forceStoreRerender(fiber);
     }
   };
   // Subscribe to the store and return a clean-up function.
@@ -1927,149 +1929,277 @@ function checkIfSnapshotChanged<T>(inst: StoreInstance<T>): boolean {
   }
 }
 
-function forceStoreRerender(fiber: Fiber, lane: Lane) {
-  const root = enqueueConcurrentRenderForLane(fiber, lane);
+function forceStoreRerender(fiber: Fiber) {
+  const root = enqueueConcurrentRenderForLane(fiber, SyncLane);
   if (root !== null) {
-    scheduleUpdateOnFiber(root, fiber, lane);
+    scheduleUpdateOnFiber(root, fiber, SyncLane);
   }
 }
 
 type StoreReader<S, T> = {
   store: ReactStore<S, mixed>,
   root: FiberRoot,
-  // Updated in the layout phase.
+  // Updated in the passive phase.
   selector: (state: S, previous: T | void) => T,
   value: T,
-  // Updated during render, like `queue.lastRenderedState`. A render that
-  // suspends commits hidden without running layout effects, so this can be
-  // newer than `value`. Only trusted when the fiber has no pending work.
+  // The version the queue started from, while it is missing actions that
+  // were dispatched before it. Updated in the passive phase.
+  version: StoreVersion<S> | null,
+  // Updated during render, like `queue.lastRenderedState`.
   lastRenderedValue: T,
+  // A reader hidden by Activity is unsubscribed, so its queue misses actions.
+  isSubscribed: boolean,
 };
 
 function selectState<S>(state: S): S {
   return state;
 }
 
+// A reader queues the store's actions and reduces them with the store's
+// reducer, so React rebases, entangles, and holds them for async Actions as it
+// does for useReducer. A reader that has no actions to catch up with, such as
+// one that mounts while a Transition is pending, queues a version instead.
+function reduceStoreUpdate<S, A>(
+  store: ReactStore<S, A>,
+  state: S,
+  update: StoreUpdate<S, A>,
+): S {
+  const version = update.version;
+  return version !== null
+    ? version.state
+    : store._reducer(state, update.action as any);
+}
+
 function mountStore<S, T>(
   store: ReactStore<S, mixed>,
   selector?: (state: S, previous: T | void) => T,
 ): S | T {
+  const fiber = currentlyRenderingFiber;
+  const root = getWorkInProgressRoot();
+  if (root === null) {
+    throw new Error(
+      'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
+    );
+  }
+  if (__DEV__) {
+    const maybeStore: mixed = store;
+    if (
+      maybeStore === null ||
+      typeof maybeStore !== 'object' ||
+      maybeStore.$$typeof !== REACT_STORE_TYPE
+    ) {
+      console.error('useStore expects a store created by createStore.');
+    }
+  }
   const hook = mountWorkInProgressHook();
-  return renderStore(hook, null, store, selector);
+  const version = mountStoreQueue(fiber, hook, store, root);
+  const state = version.state;
+  const actualSelector: (state: S, previous: T | void) => T =
+    selector === undefined ? (selectState as any) : selector;
+  const value = actualSelector(state, undefined);
+  const reader: StoreReader<S, T> = {
+    store,
+    root,
+    selector: actualSelector,
+    value,
+    version: null,
+    lastRenderedValue: value,
+    isSubscribed: false,
+  };
+  const readerHook = mountWorkInProgressHook();
+  readerHook.memoizedState = value;
+  readerHook.queue = reader;
+  mountEffect(subscribeToReactStore.bind(null, fiber, hook.queue, reader), [
+    store,
+  ]);
+  fiber.flags |= PassiveEffect;
+  pushSimpleEffect(
+    HookHasEffect | HookPassive,
+    createEffectInstance(),
+    updateStoreReader.bind(
+      null,
+      fiber,
+      hook.queue,
+      reader,
+      actualSelector,
+      value,
+      version,
+    ),
+    null,
+  );
+  return value;
 }
 
 function updateStore<S, T>(
   store: ReactStore<S, mixed>,
   selector?: (state: S, previous: T | void) => T,
 ): S | T {
-  const hook = updateWorkInProgressHook();
-  const inst: StoreReader<S, T> = hook.queue;
-  return renderStore(hook, inst.store === store ? inst : null, store, selector);
-}
-
-function renderStore<S, T>(
-  hook: Hook,
-  prevInst: StoreReader<S, T> | null,
-  store: ReactStore<S, mixed>,
-  selector: void | ((state: S, previous: T | void) => T),
-): S | T {
   const fiber = currentlyRenderingFiber;
-  let root: FiberRoot;
-  if (prevInst !== null) {
-    root = prevInst.root;
-  } else {
-    // Mounting, or reading a different store: start a fresh selection.
-    if (__DEV__) {
-      const maybeStore: mixed = store;
-      if (
-        maybeStore === null ||
-        typeof maybeStore !== 'object' ||
-        maybeStore.$$typeof !== REACT_STORE_TYPE
-      ) {
-        console.error('useStore expects a store created by createStore.');
-      }
-    }
-    const workInProgressRoot = getWorkInProgressRoot();
-    if (workInProgressRoot === null) {
-      throw new Error(
-        'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
-      );
-    }
-    root = workInProgressRoot;
-  }
+  const hook = updateWorkInProgressHook();
+  const current: Hook = currentHook as any;
+  const readerHook = updateWorkInProgressHook();
+  let reader: StoreReader<S, T> = readerHook.queue;
   const actualSelector: (state: S, previous: T | void) => T =
     selector === undefined ? (selectState as any) : selector;
+
+  let state: S;
+  // The version the state was read from, if it was not reduced from the queue.
+  let version: StoreVersion<S> | null = null;
+  let previous: T | void = readerHook.memoizedState;
+  if (reader.store !== store) {
+    // A different store. Updates queued for the previous one no longer apply.
+    version = mountStoreQueue(fiber, hook, store, reader.root);
+    state = version.state;
+    previous = undefined;
+    markWorkInProgressReceivedUpdate();
+  } else {
+    // A hidden tree also renders the lanes it deferred. The store's state lives
+    // above the tree, so the reader leaves out the ones its root has not
+    // committed and is not rendering, as the rest of the root does.
+    const treeRenderLanes = renderLanes;
+    const root = reader.root;
+    renderLanes = removeLanes(
+      treeRenderLanes,
+      removeLanes(
+        root.pendingLanes,
+        getWorkInProgressRootEntangledRenderLanes(),
+      ),
+    );
+    try {
+      state = updateReducerImpl<S, StoreUpdate<S, mixed>>(
+        hook,
+        current,
+        reduceStoreUpdate.bind(null, store),
+      )[0];
+    } finally {
+      renderLanes = treeRenderLanes;
+    }
+    if (!reader.isSubscribed && !getIsHydrating()) {
+      // Revealed after being hidden, the queue missed actions. Read the store,
+      // as a mount does.
+      version = renderStoreVersion(fiber, store, reader.root);
+      state = version.state;
+      hook.memoizedState = hook.baseState = state;
+      hook.baseQueue = null;
+      hook.queue.lastRenderedState = state;
+      if (!includesBlockingLane(renderLanes)) {
+        pushStoreReadCheck(fiber, store, reader.root, state);
+      }
+    }
+  }
+  const value = actualSelector(state, previous);
+  if (!is(value, previous)) {
+    markWorkInProgressReceivedUpdate();
+  }
+  readerHook.memoizedState = value;
+  if (reader.store !== store) {
+    reader = {
+      store,
+      root: reader.root,
+      selector: actualSelector,
+      value,
+      version: null,
+      lastRenderedValue: value,
+      isSubscribed: false,
+    };
+    readerHook.queue = reader;
+  } else {
+    reader.lastRenderedValue = value;
+  }
+
+  updateEffect(subscribeToReactStore.bind(null, fiber, hook.queue, reader), [
+    store,
+  ]);
+  const readerChanged =
+    version !== null ||
+    reader.selector !== actualSelector ||
+    !is(reader.value, value);
+  // Always in the effect list, so that revealing a hidden Activity tree checks
+  // for actions dispatched while it was unsubscribed.
+  pushSimpleEffect(
+    readerChanged ? HookHasEffect | HookPassive : HookPassive,
+    createEffectInstance(),
+    updateStoreReader.bind(
+      null,
+      fiber,
+      hook.queue,
+      reader,
+      actualSelector,
+      value,
+      version,
+    ),
+    null,
+  );
+  if (readerChanged) {
+    fiber.flags |= PassiveEffect;
+  }
+  return value;
+}
+
+// A reader with no queue history starts from the state its root shows at
+// these lanes. That read is not from a queue, so it is checked for consistency.
+function mountStoreQueue<S>(
+  fiber: Fiber,
+  hook: Hook,
+  store: ReactStore<S, mixed>,
+  root: FiberRoot,
+): StoreVersion<S> {
   const isHydrating = getIsHydrating();
   const version = isHydrating
     ? // The client store must be created from the state the server rendered.
       store._initial
-    : readStoreVersion(fiber, store, root, renderLanes);
-  const previous: T | void = prevInst === null ? undefined : hook.memoizedState;
-  const value = actualSelector(version.state, previous);
-  if (prevInst === null || !is(previous, value)) {
-    hook.memoizedState = value;
-    markWorkInProgressReceivedUpdate();
+    : renderStoreVersion(fiber, store, root);
+  const state = version.state;
+  hook.memoizedState = hook.baseState = state;
+  hook.baseQueue = null;
+  const queue: UpdateQueue<S, StoreUpdate<S, mixed>> = {
+    pending: null,
+    lanes: NoLanes,
+    dispatch: null,
+    lastRenderedReducer: reduceStoreUpdate.bind(null, store),
+    lastRenderedState: state,
+  };
+  hook.queue = queue;
+  if (!isHydrating && !includesBlockingLane(renderLanes)) {
+    pushStoreReadCheck(fiber, store, root, state);
   }
+  return version;
+}
 
-  if (!isHydrating) {
-    // Like a skipped update: a render that does not include the root's pending
-    // Transition toward the latest state leaves that work on the fiber.
-    const skippedLanes = removeLanes(
-      getPendingStoreLanes(store, root),
-      renderLanes,
-    );
-    if (skippedLanes !== NoLanes && version !== store._head) {
-      fiber.lanes = mergeLanes(fiber.lanes, skippedLanes);
-      markSkippedUpdateLanes(skippedLanes);
-    }
-    if (!includesBlockingLane(renderLanes)) {
-      const lanes = renderLanes;
-      pushStoreConsistencyCheck(
-        fiber,
-        () => readStoreVersion(fiber, store, root, lanes),
-        version,
-      );
-    }
-  }
-
-  let inst = prevInst;
-  if (inst === null) {
-    inst = {
-      store,
-      root,
-      selector: actualSelector,
-      value,
-      lastRenderedValue: value,
-    };
-    hook.queue = inst;
-  } else {
-    inst.lastRenderedValue = value;
-  }
-  const subscribe = subscribeToReactStore.bind(null, fiber, inst);
-  // Passive, like useSyncExternalStore: a Suspense boundary showing its
-  // fallback keeps the passive effects of its hidden content connected, so a
-  // hidden reader still hears about the update that reveals it.
-  if (currentHook === null) {
-    mountEffect(subscribe, [store]);
-  } else {
-    updateEffect(subscribe, [store]);
-  }
-  const instanceChanged =
-    prevInst === null ||
-    inst.selector !== actualSelector ||
-    !is(inst.value, value);
-  // Always in the effect list, so that revealing a hidden Activity tree checks
-  // for actions dispatched while it was hidden.
-  pushSimpleEffect(
-    instanceChanged ? HookHasEffect | HookLayout : HookLayout,
-    createEffectInstance(),
-    updateStoreReader.bind(null, fiber, inst, actualSelector, value),
-    null,
+function pushStoreReadCheck<S>(
+  fiber: Fiber,
+  store: ReactStore<S, mixed>,
+  root: FiberRoot,
+  state: S,
+): void {
+  const lanes = renderLanes;
+  pushStoreConsistencyCheck(
+    fiber,
+    () => readStoreVersion(fiber, store, root, lanes).state,
+    state,
   );
-  if (instanceChanged) {
-    fiber.flags |= UpdateEffect;
+}
+
+// A reader with no queue history reads the store at the render lanes. Like a
+// queue that reads an update from a pending async Action, it waits for the
+// Action to finish if what it reads includes the Action's actions.
+function renderStoreVersion<S>(
+  fiber: Fiber,
+  store: ReactStore<S, mixed>,
+  root: FiberRoot,
+): StoreVersion<S> {
+  const version = readStoreVersion(fiber, store, root, renderLanes);
+  if (
+    version !== store._sync &&
+    store._pendingAction !== null &&
+    includesSomeLane(renderLanes, peekEntangledActionLane())
+  ) {
+    const entangledActionThenable = peekEntangledActionThenable();
+    if (entangledActionThenable !== null) {
+      throw entangledActionThenable;
+    }
   }
-  return value;
+  return version;
 }
 
 function readStoreVersion<S>(
@@ -2086,147 +2216,158 @@ function readStoreVersion<S>(
 
 function updateStoreReader<S, T>(
   fiber: Fiber,
-  inst: StoreReader<S, T>,
+  queue: UpdateQueue<S, StoreUpdate<S, mixed>>,
+  reader: StoreReader<S, T>,
   selector: (state: S, previous: T | void) => T,
   value: T,
+  version: StoreVersion<S> | null,
 ): void {
-  inst.selector = selector;
-  inst.value = value;
-  // An action may have been dispatched between render and now.
-  checkStoreReader(fiber, inst);
+  reader.selector = selector;
+  reader.value = value;
+  if (version !== null) {
+    // Actions dispatched between reading the store and subscribing to it are
+    // not in the queue.
+    checkStoreReader(fiber, queue, reader, version);
+  }
 }
 
 function subscribeToReactStore<S, T>(
   fiber: Fiber,
-  inst: StoreReader<S, T>,
+  queue: UpdateQueue<S, StoreUpdate<S, mixed>>,
+  reader: StoreReader<S, T>,
 ): () => void {
-  const store = inst.store;
-  const onStoreChange = (isTransition: boolean, lane?: Lane) => {
-    if (lane === undefined) {
+  const store = reader.store;
+  const onStoreChange = (update: StoreUpdate<S, mixed> | null, lane?: Lane) => {
+    if (update === null) {
+      const version = reader.version;
+      if (version !== null) {
+        // Catch up with the actions the queue started without.
+        reader.version = null;
+        dispatchStoreUpdate(
+          fiber,
+          queue,
+          reader,
+          {
+            action: undefined,
+            version: readStoreVersion(fiber, store, reader.root, NoLanes),
+            head: null,
+            sync: null,
+          },
+          lane === undefined ? SyncLane : lane,
+        );
+      }
+    } else {
       const dispatchLane = requestUpdateLane(fiber);
       startUpdateTimerByLane(dispatchLane, 'store.dispatch()', fiber);
-      handleStoreReaderChange(fiber, inst, isTransition, dispatchLane);
-    } else {
-      handleStoreReaderChange(fiber, inst, isTransition, lane);
+      dispatchStoreUpdate(fiber, queue, reader, update, dispatchLane);
     }
   };
   store._readers.add(onStoreChange);
-  // An action may have been dispatched between the layout and passive phases.
-  checkStoreReader(fiber, inst);
-  const isStrict = __DEV__ && (fiber.mode & StrictLegacyMode) !== NoMode;
-  if (isStrict) {
-    store._strictReaders = (store._strictReaders || 0) + 1;
-  }
+  reader.isSubscribed = true;
   return () => {
     store._readers.delete(onStoreChange);
-    if (isStrict) {
-      store._strictReaders = (store._strictReaders || 0) - 1;
-    }
+    reader.isSubscribed = false;
   };
 }
 
-function handleStoreReaderChange<S, T>(
+// Catches up a reader that read `renderedVersion` with the store.
+function checkStoreReader<S, T>(
   fiber: Fiber,
-  inst: StoreReader<S, T>,
-  isTransition: boolean,
+  queue: UpdateQueue<S, StoreUpdate<S, mixed>>,
+  reader: StoreReader<S, T>,
+  renderedVersion: StoreVersion<S>,
+): void {
+  const store = reader.store;
+  const head = store._head;
+  const version = readStoreVersion(fiber, store, reader.root, NoLanes);
+  if (version !== renderedVersion) {
+    dispatchStoreUpdate(
+      fiber,
+      queue,
+      reader,
+      {action: undefined, version, head: null, sync: null},
+      SyncLane,
+    );
+  }
+  reader.version = null;
+  if (version !== head) {
+    const pendingLanes = getPendingStoreLanes(store, reader.root);
+    const joinLane =
+      pendingLanes !== NoLanes
+        ? getHighestPriorityLane(pendingLanes)
+        : store._pendingAction !== null
+          ? peekEntangledActionLane()
+          : NoLane;
+    if (joinLane !== NoLane) {
+      // Mounted while its root renders a Transition or an async Action toward
+      // the latest state: render with it.
+      dispatchStoreUpdate(
+        fiber,
+        queue,
+        reader,
+        {action: undefined, version: head, head: null, sync: null},
+        joinLane,
+      );
+      if (pendingLanes === NoLanes) {
+        markStoreRootBehind(store, reader.root, joinLane);
+      }
+    } else {
+      reader.version = version;
+    }
+  }
+}
+
+// dispatchSetState for a store: skip rendering when the selection is
+// unchanged, but keep the update in the queue for rebasing.
+function dispatchStoreUpdate<S, T>(
+  fiber: Fiber,
+  queue: UpdateQueue<S, StoreUpdate<S, mixed>>,
+  reader: StoreReader<S, T>,
+  action: StoreUpdate<S, mixed>,
   lane: Lane,
 ): void {
-  const store = inst.store;
-  const head = store._head;
-  if (isTransitionLane(lane)) {
-    if (!canSkipStoreRender(fiber, inst, head)) {
-      forceStoreRerender(fiber, lane);
-    }
-    return;
-  }
-  // A Transition dispatch that this fiber received at a non-Transition lane, as
-  // in a legacy root, renders the latest state.
-  const version = isTransition
-    ? head
-    : readStoreVersion(fiber, store, inst.root, NoLanes);
-  if (!canSkipStoreRender(fiber, inst, version)) {
-    forceStoreRerender(fiber, lane);
-  }
-  if (version !== head && !isSameStoreSelection(inst, version, head)) {
-    // Render with the root's pending Transition toward the latest state.
-    const pendingLanes = getPendingStoreLanes(store, inst.root);
-    if (pendingLanes !== NoLanes) {
-      forceStoreRerender(fiber, getHighestPriorityLane(pendingLanes));
-    }
-  }
-}
-
-// Compares the store with what this reader committed, rather than with pending
-// work, which mid-Transition is always present.
-function checkStoreReader<S, T>(fiber: Fiber, inst: StoreReader<S, T>): void {
-  const store = inst.store;
-  const head = store._head;
-  const version = readStoreVersion(fiber, store, inst.root, NoLanes);
-  const committed = inst.value;
-  let isCommittedSelection;
-  try {
-    isCommittedSelection = is(
-      inst.selector(version.state, committed),
-      committed,
-    );
-  } catch (error) {
-    isCommittedSelection = false;
-  }
-  if (!isCommittedSelection) {
-    forceStoreRerender(fiber, SyncLane);
-  }
-  if (version !== head && !isSameStoreSelection(inst, version, head)) {
-    const pendingLanes = getPendingStoreLanes(store, inst.root);
-    const alternate = fiber.alternate;
-    const fiberLanes =
-      alternate === null
-        ? fiber.lanes
-        : mergeLanes(fiber.lanes, alternate.lanes);
-    if (
-      pendingLanes !== NoLanes &&
-      !includesSomeLane(fiberLanes, pendingLanes)
-    ) {
-      forceStoreRerender(fiber, getHighestPriorityLane(pendingLanes));
-    }
-  }
-}
-
-// Like the eager bailout for setState: only when nothing is pending on the
-// fiber is its last render the state it shows.
-function canSkipStoreRender<S, T>(
-  fiber: Fiber,
-  inst: StoreReader<S, T>,
-  version: StoreVersion<S>,
-): boolean {
+  const update: Update<S, StoreUpdate<S, mixed>> = {
+    lane,
+    revertLane: NoLane,
+    gesture: null,
+    action,
+    hasEagerState: false,
+    eagerState: null,
+    next: null as any,
+  };
   const alternate = fiber.alternate;
   if (
-    fiber.lanes !== NoLanes ||
-    (alternate !== null && alternate.lanes !== NoLanes)
+    fiber.lanes === NoLanes &&
+    (alternate === null || alternate.lanes === NoLanes)
   ) {
-    return false;
+    try {
+      const store = reader.store;
+      const lastRenderedState: S = queue.lastRenderedState as any;
+      const eagerState =
+        action.head !== null && is(lastRenderedState, action.head.state)
+          ? store._head.state
+          : action.sync !== null && is(lastRenderedState, action.sync.state)
+            ? store._sync.state
+            : reduceStoreUpdate(store, lastRenderedState, action);
+      update.hasEagerState = true;
+      update.eagerState = eagerState;
+      if (
+        is(
+          reader.selector(eagerState, reader.lastRenderedValue),
+          reader.lastRenderedValue,
+        )
+      ) {
+        enqueueConcurrentHookUpdateAndEagerlyBailout(fiber, queue, update);
+        return;
+      }
+    } catch (error) {
+      // Suppress the error. It will throw again in the render phase.
+    }
   }
-  const rendered = inst.lastRenderedValue;
-  try {
-    return is(inst.selector(version.state, rendered), rendered);
-  } catch (error) {
-    // Render calls the selector again and throws there.
-    return false;
-  }
-}
-
-function isSameStoreSelection<S, T>(
-  inst: StoreReader<S, T>,
-  version: StoreVersion<S>,
-  otherVersion: StoreVersion<S>,
-): boolean {
-  const previous = inst.lastRenderedValue;
-  try {
-    return is(
-      inst.selector(version.state, previous),
-      inst.selector(otherVersion.state, previous),
-    );
-  } catch (error) {
-    return false;
+  const root = enqueueConcurrentHookUpdate(fiber, queue, update, lane);
+  if (root !== null) {
+    scheduleUpdateOnFiber(root, fiber, lane);
+    entangleTransitionUpdate(root, queue, lane);
   }
 }
 

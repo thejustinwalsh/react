@@ -44,6 +44,7 @@ import type {
   SpawnedCachePool,
 } from './ReactFiberCacheComponent';
 import type {UpdateQueue} from './ReactFiberClassUpdateQueue';
+import {suspendIfRootReadsStoreAction} from './ReactFiberStore';
 import type {RootState} from './ReactFiberRoot';
 import type {TracingMarkerInstance} from './ReactFiberTracingMarkerComponent';
 import type {ViewTransitionState} from './ReactFiberViewTransitionComponent';
@@ -119,6 +120,7 @@ import {
   enableCPUSuspense,
   disableLegacyMode,
   enableViewTransition,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import shallowEqual from 'shared/shallowEqual';
 import getComponentNameFromFiber from 'react-reconciler/src/getComponentNameFromFiber';
@@ -1861,6 +1863,9 @@ function updateHostRoot(
   // it needs to happen after the `pushCacheProvider` call above to avoid a
   // context stack mismatch. A bit unfortunate.
   suspendIfUpdateReadFromEntangledAsyncAction();
+  if (enableStore) {
+    suspendIfRootReadsStoreAction(root, renderLanes);
+  }
 
   // Caution: React DevTools currently depends on this property
   // being called "element".
@@ -3973,6 +3978,9 @@ function attemptEarlyBailoutIfNoScheduledUpdate(
       const cache: Cache = current.memoizedState.cache;
       pushCacheProvider(workInProgress, cache);
       resetHydrationState();
+      if (enableStore) {
+        suspendIfRootReadsStoreAction(root, renderLanes);
+      }
       break;
     }
     case HostSingleton:

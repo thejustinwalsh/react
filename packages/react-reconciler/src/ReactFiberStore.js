@@ -10,6 +10,10 @@
 import type {ReactStore, StoreVersion} from 'shared/ReactTypes';
 import type {FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
+import {
+  peekEntangledActionLane,
+  peekEntangledActionThenable,
+} from './ReactFiberAsyncAction';
 
 import {
   NoLane,
@@ -57,7 +61,7 @@ export function getPendingStoreLanes<S, A>(
     : intersectLanes(root.pendingLanes, pendingLanes);
 }
 
-function markStoreRootBehind<S, A>(
+export function markStoreRootBehind<S, A>(
   store: ReactStore<S, A>,
   root: FiberRoot,
   lane: Lane,
@@ -121,37 +125,94 @@ export function markTransitionStoreRoots(
         root = root.next;
       }
     }
-    if (store._rootsBehind === 0) {
+    if (
+      transitionLane !== NoLane &&
+      transitionLane === peekEntangledActionLane()
+    ) {
+      const action = peekEntangledActionThenable();
+      if (action !== null && store._pendingAction !== action) {
+        store._pendingAction = action;
+        const settle = () => {
+          if (store._pendingAction === action) {
+            store._pendingAction = null;
+            finishStoreRoots(store);
+          }
+        };
+        action.then(settle, settle);
+      }
+    }
+    if (store._rootsBehind === 0 && store._pendingAction === null) {
       store._sync = store._head;
       store._roots.clear();
     }
   });
 }
 
-// Called after a root commits. Once every root that rendered a store's
-// Transition has committed it, the state on screen is the latest state again.
-export function commitStoreRoots(root: FiberRoot): void {
-  storesWithPendingRoots.forEach(store => {
+// A store's state lives above every root, so a render that includes an async
+// Action's updates to a store waits for the Action at the root, like an update
+// to the root itself does.
+export function suspendIfRootReadsStoreAction(
+  root: FiberRoot,
+  lanes: Lanes,
+): void {
+  if (storesWithPendingRoots.size === 0) {
+    return;
+  }
+  const actionLane = peekEntangledActionLane();
+  const action = peekEntangledActionThenable();
+  if (action === null || !includesSomeLane(lanes, actionLane)) {
+    return;
+  }
+  const stores = Array.from(storesWithPendingRoots);
+  for (let i = 0; i < stores.length; i++) {
+    const store = stores[i];
     const pendingLanes = store._roots.get(root);
     if (
+      store._pendingAction === action &&
       pendingLanes !== undefined &&
+      includesSomeLane(pendingLanes, actionLane)
+    ) {
+      // TODO: Instead of the throwing the thenable directly, throw a
+      // special object like `use` does so we can detect if it's captured
+      // by userspace.
+      throw action;
+    }
+  }
+}
+
+// Called after a root commits.
+export function commitStoreRoots(root: FiberRoot): void {
+  storesWithPendingRoots.forEach(finishStoreRoots);
+}
+
+// A root has committed a store's Transition once the lanes it rendered it at
+// are no longer pending. A Transition in an async Action is not finished until
+// the Action is, because the Action can dispatch again at the same lane. Once
+// every root has committed, the state on screen is the latest state again.
+function finishStoreRoots<S, A>(store: ReactStore<S, A>): void {
+  if (store._pendingAction !== null) {
+    return;
+  }
+  store._roots.forEach((pendingLanes, key) => {
+    const root: FiberRoot = key as any;
+    if (
       pendingLanes !== NoLanes &&
       !includesSomeLane(root.pendingLanes, pendingLanes)
     ) {
       store._roots.set(root, NoLanes);
       store._rootsBehind--;
     }
-    if (store._rootsBehind === 0) {
-      storesWithPendingRoots.delete(store);
-      store._roots.clear();
-      if (store._sync !== store._head) {
-        store._sync = store._head;
-        // Readers in roots that did not render the Transition catch up to it.
-        const readers = Array.from(store._readers);
-        for (let i = 0; i < readers.length; i++) {
-          readers[i](false, SyncLane);
-        }
+  });
+  if (store._rootsBehind === 0 && !store._isTransitionQueued) {
+    storesWithPendingRoots.delete(store);
+    store._roots.clear();
+    if (store._sync !== store._head) {
+      store._sync = store._head;
+      // Readers in roots that did not render the Transition catch up to it.
+      const readers = Array.from(store._readers);
+      for (let i = 0; i < readers.length; i++) {
+        readers[i](null, SyncLane);
       }
     }
-  });
+  }
 }

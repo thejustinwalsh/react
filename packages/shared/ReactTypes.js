@@ -74,6 +74,16 @@ export type StoreVersion<S> = {
   state: S,
 };
 
+// What a reader queues: an action to reduce, or a version to show.
+export type StoreUpdate<S, A> = {
+  action: A | void,
+  version: StoreVersion<S> | null,
+  // The versions the store reduced the action from. A reader showing one of
+  // them reuses the store's result.
+  head: StoreVersion<S> | null,
+  sync: StoreVersion<S> | null,
+};
+
 export type ReactStore<S, A> = {
   $$typeof: symbol | number,
   getState(): S,
@@ -85,9 +95,10 @@ export type ReactStore<S, A> = {
   // What a root that has not shown a pending Transition shows. The same object
   // as _head when no Transition is pending.
   _sync: StoreVersion<S>,
-  // Notified synchronously after each dispatch. The lane is only passed when
-  // React schedules the reader itself.
-  _readers: Set<(isTransition: boolean, lane?: number) => void>,
+  _reducer: (S, A) => S,
+  // Notified synchronously with each action, or with null to catch up with the
+  // state their root shows at the given lane.
+  _readers: Set<(update: StoreUpdate<S, A> | null, lane?: number) => void>,
   // Keyed by FiberRoot while a Transition is pending: the Transition lanes the
   // root has not committed yet, or NoLanes once it has.
   _roots: Map<mixed, number>,
@@ -95,8 +106,9 @@ export type ReactStore<S, A> = {
   // A Transition in the current event dispatched to this store, and the
   // renderer has not marked its roots yet.
   _isTransitionQueued: boolean,
-  // DEV only: readers rendered inside StrictMode.
-  _strictReaders?: number,
+  // An async Action that dispatched to this store and has not finished. Its
+  // updates stay hidden until it does, as updates to useState do.
+  _pendingAction: null | Thenable<void>,
 };
 
 export type ReactPortal = {

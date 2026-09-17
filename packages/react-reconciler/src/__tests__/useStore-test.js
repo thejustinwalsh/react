@@ -268,8 +268,9 @@ describe('useStore', () => {
     expect(root).toMatchRenderedOutput('homecount:0');
 
     // Applied to the state on screen now, and after the Transition's update.
+    // Page has a pending update, so like useState it renders to rebase it.
     await act(() => store.dispatch(s => ({...s, count: s.count + 1})));
-    assertLog(['count:1', 'Loading']);
+    assertLog(['home', 'count:1', 'Loading']);
     expect(root).toMatchRenderedOutput('homecount:1');
 
     await act(() => resolveText('about'));
@@ -605,6 +606,37 @@ describe('useStore', () => {
     await act(() => root.render(<App mode="visible" />));
     assertLog(['1']);
     expect(root).toMatchRenderedOutput('1');
+  });
+
+  // @gate enableStore
+  it('shows the latest state when an Activity is revealed with updates still queued', async () => {
+    const store = createStore(0);
+    function Reader() {
+      return <Text text={String(useStore(store))} />;
+    }
+    function App({mode}) {
+      return (
+        <Activity mode={mode}>
+          <Reader />
+        </Activity>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App mode="visible" />));
+    assertLog(['0']);
+
+    await act(() => {
+      // The reader queues 1, then is hidden before it renders it.
+      flushSync(() => {
+        store.dispatch(1);
+        root.render(<App mode="hidden" />);
+      });
+      store.dispatch(2);
+      flushSync(() => root.render(<App mode="visible" />));
+    });
+    assertLog(['2']);
+    expect(root).toMatchRenderedOutput('2');
   });
 
   // @gate enableStore
@@ -1078,5 +1110,40 @@ describe('useStore', () => {
     // The reader mounts before the Transition, then renders with it.
     assertLog(['n0', 'Loading', 'n10']);
     expect(root).toMatchRenderedOutput('homen0');
+  });
+
+  // @gate enableStore
+  it('holds a store update inside an async Action until the Action finishes', async () => {
+    const store = createStore(2, (n, action) =>
+      action === 'double' ? n * 2 : n + 1,
+    );
+    function App() {
+      return <Text text={String(useStore(store))} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['2']);
+
+    let finishAction;
+    await act(() =>
+      startTransition(async () => {
+        store.dispatch('double');
+        await new Promise(resolve => (finishAction = resolve));
+      }),
+    );
+    Scheduler.unstable_clearLog();
+    // Like useState, the Action's update waits for the Action.
+    expect(root).toMatchRenderedOutput('2');
+
+    // A blocking update applies to the state on screen.
+    await act(() => store.dispatch('increment'));
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('3');
+
+    await act(() => finishAction());
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('5');
+    expect(store.getState()).toBe(5);
+    Scheduler.unstable_clearLog();
   });
 });

@@ -502,7 +502,10 @@ function useStore<S, T>(
   selector?: (state: S, previous: T | void) => T,
 ): S | T {
   // useStore() composes multiple hooks internally.
-  const hook = nextHook(); // Store
+  // Advance the current hook index the same number of times
+  // so that subsequent hooks have the right memoized state.
+  nextHook(); // Store
+  const hook = nextHook(); // Value
   nextHook(); // Effect
   let value;
   if (hook !== null) {

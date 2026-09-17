@@ -7,7 +7,7 @@
  * @flow
  */
 
-import type {ReactStore, StoreVersion} from 'shared/ReactTypes';
+import type {ReactStore, StoreUpdate, StoreVersion} from 'shared/ReactTypes';
 import type {Transition} from './ReactStartTransition';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
@@ -34,14 +34,6 @@ export function createStore<S, A>(
   const actualReducer: (S, A) => S =
     reducer === undefined ? (basicStateReducer as any) : reducer;
   const initial: StoreVersion<S> = {state: initialState};
-  const reduce = (state: S, action: A): S => {
-    if (__DEV__ && (store._strictReaders || 0) > 0) {
-      // Like StrictMode does for useReducer, surface an impure reducer by
-      // calling it twice.
-      actualReducer(state, action);
-    }
-    return actualReducer(state, action);
-  };
   const subscriptions: Set<(action: A) => void> = new Set();
   const store: ReactStore<S, A> = {
     $$typeof: REACT_STORE_TYPE,
@@ -66,7 +58,7 @@ export function createStore<S, A>(
       const sync = store._sync;
       const isTransition = transition !== null;
 
-      const headState = reduce(head.state, action);
+      const headState = actualReducer(head.state, action);
       const nextHead: StoreVersion<S> = is(headState, head.state)
         ? head
         : {state: headState};
@@ -78,7 +70,7 @@ export function createStore<S, A>(
         if (sync === head) {
           nextSync = nextHead;
         } else {
-          const syncState = reduce(sync.state, action);
+          const syncState = actualReducer(sync.state, action);
           if (!is(syncState, sync.state)) {
             nextSync = {state: syncState};
           }
@@ -88,32 +80,37 @@ export function createStore<S, A>(
       // its scope finishes.
       const isMarkedByRenderer =
         transition !== null && ReactSharedInternals.S !== null;
-      if (nextHead === head && nextSync === sync) {
-        // Like an update to a hook queue, a Transition on a store that already
-        // has one pending still entangles with it.
-        if (
-          transition !== null &&
-          isMarkedByRenderer &&
-          (store._rootsBehind > 0 || store._isTransitionQueued)
-        ) {
-          queueTransitionStore(transition, store);
-        }
-        return;
-      }
-
+      const didChange = nextHead !== head || nextSync !== sync;
       store._head = nextHead;
       store._sync = nextSync;
-      if (transition !== null && isMarkedByRenderer) {
+      // Like an update to a hook queue, a Transition on a store that already
+      // has one pending entangles with it even if it changes nothing.
+      if (
+        transition !== null &&
+        isMarkedByRenderer &&
+        (didChange || store._rootsBehind > 0 || store._isTransitionQueued)
+      ) {
         queueTransitionStore(transition, store);
       }
+      // Every action reaches every reader, as every setState reaches its hook.
+      const update: StoreUpdate<S, A> = {
+        action,
+        version: null,
+        head,
+        sync: isTransition ? null : sync,
+      };
       const readers = Array.from(store._readers);
       for (let i = 0; i < readers.length; i++) {
-        readers[i](isTransition);
+        readers[i](update);
+      }
+      if (!didChange) {
+        return;
       }
       // Nothing waits on this dispatch, so the state on screen is the latest.
       if (
         !isMarkedByRenderer &&
         !store._isTransitionQueued &&
+        store._pendingAction === null &&
         store._rootsBehind === 0
       ) {
         store._sync = store._head;
@@ -127,6 +124,7 @@ export function createStore<S, A>(
         subscriptions.delete(callback);
       };
     },
+    _reducer: actualReducer,
     _initial: initial,
     _head: initial,
     _sync: initial,
@@ -134,10 +132,8 @@ export function createStore<S, A>(
     _roots: new Map(),
     _rootsBehind: 0,
     _isTransitionQueued: false,
+    _pendingAction: null,
   };
-  if (__DEV__) {
-    store._strictReaders = 0;
-  }
   return store;
 }
 

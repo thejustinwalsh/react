@@ -19,25 +19,40 @@ let Random;
 const SEED = process.env.FUZZ_TEST_SEED || 'default';
 
 describe('ReactStoreFuzz', () => {
-  beforeEach(() => {
+  function resetModules() {
     jest.resetModules();
     React = require('react');
     ReactNoop = require('react-noop-renderer');
     Scheduler = require('scheduler');
     act = require('internal-test-utils').act;
+  }
+
+  beforeEach(() => {
+    resetModules();
     Random = require('random-seed');
   });
 
   jest.setTimeout(20000);
 
-  // A store and useReducer receive the same actions, in the same order and at
-  // the same priority, so useReducer defines what a store may show.
+  // Randomized actions checked against the rules a store follows. A store's
+  // state behaves like state that lives above each root and is read through
+  // context, so React's rules for Transitions and Suspense decide what a root
+  // may commit:
   //
-  // The store renders less than useReducer, and React entangles Transitions
-  // based on pending work, so the store can wait on a Transition that
-  // useReducer does not. It may show an earlier committed output while it
-  // waits, but never an output useReducer did not commit, and once all data
-  // has loaded both must be the same.
+  // 1. A commit shows one state: every reader shows the same state, and the
+  //    root's own state is from the same moment.
+  // 2. That state includes every blocking action from earlier events, and the
+  //    pending Transitions of each queue in the order they were dispatched,
+  //    because updates to one queue entangle. Updates that share a lane, from
+  //    the same event or the same async Action, commit together.
+  // 3. An async Action's updates commit once the Action finishes.
+  // 4. A root never goes back to an earlier state.
+  // 5. A Transition does not replace visible content with a fallback.
+  // 6. Once every Action finishes and all data loads, the root shows the
+  //    latest state.
+  //
+  // The same rules are checked against React state that lives above the tree,
+  // which follows them by definition.
   function createFuzzer() {
     const PAGES = ['home', 'about', 'settings', 'profile'];
     const FILTERS = ['all', 'open', 'done'];
@@ -141,12 +156,13 @@ describe('ReactStoreFuzz', () => {
       return app;
     }
 
-    function createReducerApp() {
+    // The same app with its state in React, above the tree.
+    function createStateApp() {
       const app = {dispatch: null, setExtraMounted: null, App: null};
-      // The state lives in a child, the way a store's state lives outside the
-      // component whose state mounts the extra reader.
-      function StateHost({extraMounted}) {
+      app.App = function StateApp() {
+        const [extraMounted, setExtraMounted] = React.useState(false);
         const [state, dispatch] = React.useReducer(reducer, initialState);
+        app.setExtraMounted = setExtraMounted;
         app.dispatch = dispatch;
         return (
           <>
@@ -157,26 +173,36 @@ describe('ReactStoreFuzz', () => {
             {extraMounted ? <Filter filter={state.filter} /> : null}
           </>
         );
-      }
-      app.App = function ReducerApp() {
-        const [extraMounted, setExtraMounted] = React.useState(false);
-        app.setExtraMounted = setExtraMounted;
-        return <StateHost extraMounted={extraMounted} />;
       };
       return app;
     }
 
-    async function run(app, steps) {
+    // Runs the steps, then finishes every Action and loads all data. Returns
+    // the output of every commit, and the step it was committed in.
+    async function run(createApp, steps) {
+      // Lanes are assigned in a cycle, and React entangles them differently
+      // depending on where in it they are, so every app starts at the same place.
+      resetModules();
+      const app = createApp();
       textCache = new Map();
+      let finishActions = [];
       const root = ReactNoop.createRoot();
-      await act(() => root.render(<app.App />));
-      const outputs = [root.getChildrenAsJSX()];
-      const allSteps = steps.concat([
-        {actions: PAGES.map(text => ({kind: 'resolve', text}))},
-      ]);
-      for (let i = 0; i < allSteps.length; i++) {
+      const commits = [];
+      let step = -1;
+      const onRender = () => {
+        commits.push({step, output: root.getChildrenAsJSX()});
+      };
+      await act(() =>
+        root.render(
+          <React.Profiler id="root" onRender={onRender}>
+            <app.App />
+          </React.Profiler>,
+        ),
+      );
+      const allSteps = withFinalStep(steps);
+      for (step = 0; step < allSteps.length; step++) {
         await act(() => {
-          const actions = allSteps[i].actions;
+          const actions = allSteps[step].actions;
           for (let j = 0; j < actions.length; j++) {
             const action = actions[j];
             switch (action.kind) {
@@ -197,13 +223,380 @@ describe('ReactStoreFuzz', () => {
                   app.setExtraMounted(action.mounted),
                 );
                 break;
+              case 'asyncTransition':
+                React.startTransition(async () => {
+                  app.dispatch(action.action);
+                  await new Promise(resolve => finishActions.push(resolve));
+                });
+                break;
+              case 'finishActions': {
+                const pending = finishActions;
+                finishActions = [];
+                pending.forEach(resolve => resolve());
+                break;
+              }
             }
           }
         });
         Scheduler.unstable_clearLog();
-        outputs.push(root.getChildrenAsJSX());
       }
-      return outputs;
+      return commits;
+    }
+
+    function withFinalStep(steps) {
+      return steps.concat([
+        {
+          actions: [{kind: 'finishActions'}].concat(
+            PAGES.map(text => ({kind: 'resolve', text})),
+          ),
+        },
+      ]);
+    }
+
+    // Every update the steps make, with the lane group it is in. A blocking
+    // update's group is its event. A Transition's group is its event's lane:
+    // the pending async Action's lane, or the next of React's ten Transition
+    // lanes. An update that changes nothing may bail out without being queued,
+    // so it may not be in its group.
+    function describeUpdates(steps) {
+      const updates = [];
+      let latestState = initialState;
+      let latestMounted = false;
+      const actionFinishedIn = new Map();
+      // Lanes claimed again, while their earlier group may still be pending.
+      const reusedLanes = [];
+      const laneClaims = new Map();
+      let nextLane = 0;
+      let pendingAction = null;
+      let unfinished = 0;
+      for (let i = 0; i < steps.length; i++) {
+        const actions = steps[i].actions;
+        let group = null;
+        const transitionGroup = () => {
+          if (group === null) {
+            if (pendingAction !== null) {
+              group = pendingAction;
+            } else {
+              const lane = nextLane;
+              nextLane = (nextLane + 1) % 10;
+              const claim = laneClaims.has(lane) ? laneClaims.get(lane) + 1 : 0;
+              laneClaims.set(lane, claim);
+              group = 'lane' + lane + '#' + claim;
+              if (claim > 0) {
+                reusedLanes.push({
+                  group,
+                  earlierGroup: 'lane' + lane + '#' + (claim - 1),
+                });
+              }
+              if (actions.some(a => a.kind === 'asyncTransition')) {
+                pendingAction = group;
+              }
+            }
+          }
+          return group;
+        };
+        for (let j = 0; j < actions.length; j++) {
+          const a = actions[j];
+          switch (a.kind) {
+            case 'dispatch':
+            case 'transition':
+            case 'asyncTransition': {
+              const isBlocking = a.kind === 'dispatch';
+              const nextState = reducer(latestState, a.action);
+              updates.push({
+                step: i,
+                queue: 'store',
+                group: isBlocking ? 'event' + i : transitionGroup(),
+                isBlocking,
+                isNoop: nextState === latestState,
+                action: a.action,
+              });
+              latestState = nextState;
+              if (a.kind === 'asyncTransition') {
+                unfinished++;
+              }
+              break;
+            }
+            case 'mount':
+            case 'transitionMount': {
+              const isBlocking = a.kind === 'mount';
+              updates.push({
+                step: i,
+                queue: 'app',
+                group: isBlocking ? 'event' + i : transitionGroup(),
+                isBlocking,
+                isNoop: a.mounted === latestMounted,
+                mounted: a.mounted,
+              });
+              latestMounted = a.mounted;
+              break;
+            }
+            case 'finishActions':
+              unfinished = 0;
+              break;
+          }
+        }
+        // An Action finishes after the event that resolves it.
+        if (pendingAction !== null && unfinished === 0) {
+          actionFinishedIn.set(pendingAction, i);
+          pendingAction = null;
+        }
+      }
+      return {updates, actionFinishedIn, reusedLanes};
+    }
+
+    // Updates in a reused lane join the earlier group if it is still pending.
+    // `merged` has a bit for each reused lane that does.
+    function mergeReusedLanes(
+      {updates, actionFinishedIn, reusedLanes},
+      merged,
+    ) {
+      const groups = new Map();
+      const resolve = group => (groups.has(group) ? groups.get(group) : group);
+      const finishedIn = new Map(actionFinishedIn);
+      for (let i = 0; i < reusedLanes.length; i++) {
+        if ((merged & (1 << i)) !== 0) {
+          const {group, earlierGroup} = reusedLanes[i];
+          const into = resolve(earlierGroup);
+          groups.set(group, into);
+          if (finishedIn.has(group)) {
+            finishedIn.set(
+              into,
+              Math.max(finishedIn.get(group), finishedIn.get(into) ?? -1),
+            );
+          }
+        }
+      }
+      return {
+        updates: updates.map(update =>
+          update.isBlocking
+            ? update
+            : {...update, group: resolve(update.group)},
+        ),
+        actionFinishedIn: finishedIn,
+      };
+    }
+
+    function transitionGroups(updates, queue, step) {
+      const groups = [];
+      for (let i = 0; i < updates.length; i++) {
+        const update = updates[i];
+        if (
+          update.queue === queue &&
+          !update.isBlocking &&
+          update.step <= step &&
+          !groups.includes(update.group)
+        ) {
+          groups.push(update.group);
+        }
+      }
+      return groups;
+    }
+
+    // What a queue shows with the blocking updates up to `blockingStep` and
+    // the Transitions in `committed`.
+    function reduceQueue(updates, queue, step, blockingStep, committed) {
+      let value = queue === 'store' ? initialState : false;
+      for (let i = 0; i < updates.length; i++) {
+        const update = updates[i];
+        if (
+          update.queue === queue &&
+          update.step <= step &&
+          (update.isBlocking
+            ? update.step <= blockingStep
+            : committed.has(update.group))
+        ) {
+          value =
+            queue === 'store' ? reducer(value, update.action) : update.mounted;
+        }
+      }
+      return value;
+    }
+
+    // The states a commit in `step` may show: blocking updates up to the
+    // previous event, or this one, and a prefix of each queue's Transitions.
+    // Updates from the same event share a lane, so they commit together. An
+    // async Action's updates to a queue wait for the Action to finish, unless
+    // they do not change what the queue shows.
+    function allowedStates(updates, actionFinishedIn, step) {
+      const storeGroups = transitionGroups(updates, 'store', step);
+      const appGroups = transitionGroups(updates, 'app', step);
+      const allowed = [];
+      for (let blockingStep = step - 1; blockingStep <= step; blockingStep++) {
+        for (let s = 0; s <= storeGroups.length; s++) {
+          for (let a = 0; a <= appGroups.length; a++) {
+            const committed = {
+              store: new Set(storeGroups.slice(0, s)),
+              app: new Set(appGroups.slice(0, a)),
+            };
+            const isSameLaneCommitted = updates.every(
+              update =>
+                update.isBlocking ||
+                update.isNoop ||
+                update.step > step ||
+                updates.every(
+                  other =>
+                    other.queue === update.queue ||
+                    other.step !== update.step ||
+                    other.group !== update.group ||
+                    other.isNoop ||
+                    committed.store.has(update.group) ===
+                      committed.app.has(update.group),
+                ),
+            );
+            if (!isSameLaneCommitted) {
+              continue;
+            }
+            const state = reduceQueue(
+              updates,
+              'store',
+              step,
+              blockingStep,
+              committed.store,
+            );
+            const mounted = reduceQueue(
+              updates,
+              'app',
+              step,
+              blockingStep,
+              committed.app,
+            );
+            const isActionWaitedFor = ['store', 'app'].every(queue =>
+              Array.from(committed[queue]).every(group => {
+                if (
+                  !actionFinishedIn.has(group) ||
+                  actionFinishedIn.get(group) <= step
+                ) {
+                  return true;
+                }
+                const without = new Set(committed[queue]);
+                without.delete(group);
+                const value = queue === 'store' ? state : mounted;
+                return (
+                  JSON.stringify(
+                    reduceQueue(updates, queue, step, blockingStep, without),
+                  ) === JSON.stringify(value)
+                );
+              }),
+            );
+            if (isActionWaitedFor) {
+              allowed.push({position: [blockingStep, s, a], state, mounted});
+            }
+          }
+        }
+      }
+      return allowed;
+    }
+
+    function shows(output, {state, mounted}) {
+      const [page, count, filter] = output.trim().split(' ');
+      return (
+        (page === 'loading' || page === 'page:' + state.page) &&
+        count === 'count:' + state.count &&
+        filter === (mounted ? 'filter:' + state.filter : undefined)
+      );
+    }
+
+    function checkRules(steps, commits) {
+      const described = describeUpdates(withFinalStep(steps));
+      let error = null;
+      for (
+        let merged = 0;
+        merged < 1 << described.reusedLanes.length;
+        merged++
+      ) {
+        const {updates, actionFinishedIn} = mergeReusedLanes(described, merged);
+        const result = checkCommits(steps, commits, updates, actionFinishedIn);
+        if (result === null) {
+          return null;
+        }
+        if (error === null) {
+          error = result;
+        }
+      }
+      return error;
+    }
+
+    function checkCommits(steps, commits, updates, actionFinishedIn) {
+      // Positions the root may be at after each commit, never going back.
+      let positions = [[-1, 0, 0]];
+      for (let c = 0; c < commits.length; c++) {
+        const {step, output} = commits[c];
+        const next = allowedStates(updates, actionFinishedIn, step)
+          .filter(candidate => shows(output, candidate))
+          .map(candidate => candidate.position)
+          .filter(position =>
+            positions.some(previous =>
+              previous.every((value, i) => value <= position[i]),
+            ),
+          );
+        if (next.length === 0) {
+          return `Commit ${c} in step ${step} shows ${output}, which is not a state the root may show`;
+        }
+        positions = next;
+        if (c > 0) {
+          const previous = commits[c - 1].output;
+          if (
+            output.startsWith('loading') &&
+            !previous.startsWith('loading') &&
+            !updates.some(
+              update =>
+                update.step === step &&
+                update.isBlocking &&
+                update.queue === 'store' &&
+                update.action.type === 'page',
+            )
+          ) {
+            return `Commit ${c} in step ${step} replaces ${previous} with a fallback without a blocking update`;
+          }
+        }
+      }
+      const last = commits[commits.length - 1];
+      const final = allowedStates(
+        updates,
+        actionFinishedIn,
+        steps.length,
+      ).filter(candidate => {
+        const position = candidate.position;
+        return (
+          position[0] === steps.length &&
+          position[1] ===
+            transitionGroups(updates, 'store', steps.length).length &&
+          position[2] === transitionGroups(updates, 'app', steps.length).length
+        );
+      });
+      if (!shows(last.output, final[0]) || last.output.startsWith('loading')) {
+        return `The last commit shows ${last.output}, not the latest state`;
+      }
+      return null;
+    }
+
+    function describeCommits(steps, commits) {
+      return (
+        JSON.stringify(steps.map(({actions}) => actions)) +
+        '\n\nCommits:\n' +
+        commits.map(({step, output}) => `  step ${step}: ${output}`).join('\n')
+      );
+    }
+
+    async function testRules(steps) {
+      // React state follows the rules, so a failure here is in the rules.
+      const stateCommits = await run(createStateApp, steps);
+      const stateError = checkRules(steps, stateCommits);
+      if (stateError !== null) {
+        console.log(
+          'React state failed:\n\n' + describeCommits(steps, stateCommits),
+        );
+        throw new Error(stateError);
+      }
+      const storeCommits = await run(createStoreApp, steps);
+      const storeError = checkRules(steps, storeCommits);
+      if (storeError !== null) {
+        console.log(
+          'Failed fuzzy test case:\n\n' + describeCommits(steps, storeCommits),
+        );
+        throw new Error(storeError);
+      }
     }
 
     function generateSteps(rand, count) {
@@ -218,7 +611,7 @@ describe('ReactStoreFuzz', () => {
         }
       };
       const randomStepAction = () => {
-        switch (rand(6)) {
+        switch (rand(8)) {
           case 0:
             return {kind: 'dispatch', action: randomAction()};
           case 1:
@@ -228,8 +621,12 @@ describe('ReactStoreFuzz', () => {
             return {kind: 'resolve', text: PAGES[1 + rand(PAGES.length - 1)]};
           case 4:
             return {kind: 'mount', mounted: rand(2) === 0};
-          default:
+          case 5:
             return {kind: 'transitionMount', mounted: rand(2) === 0};
+          case 6:
+            return {kind: 'asyncTransition', action: randomAction()};
+          default:
+            return {kind: 'finishActions'};
         }
       };
       const steps = [];
@@ -245,32 +642,14 @@ describe('ReactStoreFuzz', () => {
       return steps;
     }
 
-    // Returns how many steps the store showed an earlier output.
-    async function testMatchesReducer(steps) {
-      const expected = await run(createReducerApp(), steps);
-      const actual = await run(createStoreApp(), steps);
-      let lagging = 0;
-      for (let i = 0; i < expected.length; i++) {
-        if (actual[i] !== expected[i]) {
-          if (!expected.slice(0, i).includes(actual[i])) {
-            // An output useReducer never committed.
-            expect(actual.slice(0, i + 1)).toEqual(expected.slice(0, i + 1));
-          }
-          lagging++;
-        }
-      }
-      expect(actual[actual.length - 1]).toEqual(expected[expected.length - 1]);
-      return lagging;
-    }
-
-    return {testMatchesReducer, generateSteps};
+    return {testRules, generateSteps};
   }
 
   describe('hard-coded cases', () => {
-    // @gate enableStore
+    // @gate enableStore && enableProfilerTimer
     it('a blocking update while a Transition waits on data', async () => {
-      const {testMatchesReducer} = createFuzzer();
-      const lagging = await testMatchesReducer([
+      const {testRules} = createFuzzer();
+      await testRules([
         {
           actions: [
             {kind: 'transition', action: {type: 'page', page: 'about'}},
@@ -280,13 +659,12 @@ describe('ReactStoreFuzz', () => {
         {actions: [{kind: 'mount', mounted: true}]},
         {actions: [{kind: 'resolve', text: 'about'}]},
       ]);
-      expect(lagging).toBe(0);
     });
 
-    // @gate enableStore
+    // @gate enableStore && enableProfilerTimer
     it('a reader hidden by a fallback hears the update that reveals it', async () => {
-      const {testMatchesReducer} = createFuzzer();
-      const lagging = await testMatchesReducer([
+      const {testRules} = createFuzzer();
+      await testRules([
         {
           actions: [
             {kind: 'transition', action: {type: 'page', page: 'settings'}},
@@ -300,13 +678,12 @@ describe('ReactStoreFuzz', () => {
         },
         {actions: [{kind: 'dispatch', action: {type: 'page', page: 'home'}}]},
       ]);
-      expect(lagging).toBe(0);
     });
 
-    // @gate enableStore
+    // @gate enableStore && enableProfilerTimer
     it('a blocking update in the same event as a Transition', async () => {
-      const {testMatchesReducer} = createFuzzer();
-      const lagging = await testMatchesReducer([
+      const {testRules} = createFuzzer();
+      await testRules([
         {actions: [{kind: 'mount', mounted: true}]},
         {
           actions: [
@@ -316,13 +693,12 @@ describe('ReactStoreFuzz', () => {
           ],
         },
       ]);
-      expect(lagging).toBe(0);
     });
 
-    // @gate enableStore
+    // @gate enableStore && enableProfilerTimer
     it('a Transition that changes nothing still entangles', async () => {
-      const {testMatchesReducer} = createFuzzer();
-      const lagging = await testMatchesReducer([
+      const {testRules} = createFuzzer();
+      await testRules([
         {
           actions: [
             {kind: 'transition', action: {type: 'page', page: 'profile'}},
@@ -335,13 +711,22 @@ describe('ReactStoreFuzz', () => {
           ],
         },
       ]);
-      expect(lagging).toBe(0);
     });
 
-    // @gate enableStore
+    // @gate enableStore && enableProfilerTimer
+    it('an update inside an async Action waits for the Action', async () => {
+      const {testRules} = createFuzzer();
+      await testRules([
+        {actions: [{kind: 'asyncTransition', action: {type: 'add', by: 2}}]},
+        {actions: [{kind: 'dispatch', action: {type: 'add', by: 1}}]},
+        {actions: [{kind: 'finishActions'}]},
+      ]);
+    });
+
+    // @gate enableStore && enableProfilerTimer
     it('a Transition no reader renders', async () => {
-      const {testMatchesReducer} = createFuzzer();
-      const lagging = await testMatchesReducer([
+      const {testRules} = createFuzzer();
+      await testRules([
         {
           actions: [
             {kind: 'transition', action: {type: 'filter', filter: 'open'}},
@@ -354,38 +739,21 @@ describe('ReactStoreFuzz', () => {
         },
         {actions: [{kind: 'transitionMount', mounted: true}]},
       ]);
-      expect(lagging).toBe(0);
     });
   });
 
-  // @gate enableStore
+  // @gate enableStore && enableProfilerTimer
+  // @gate enableStore && enableProfilerTimer
   it(`generative tests (random seed: ${SEED})`, async () => {
-    const {generateSteps, testMatchesReducer} = createFuzzer();
+    const {generateSteps, testRules} = createFuzzer();
     const rand = Random.create(SEED);
 
     // If this is too large the test will time out.
     const NUMBER_OF_TEST_CASES = 100;
     const STEPS_PER_CASE = 16;
 
-    let lagging = 0;
     for (let i = 0; i < NUMBER_OF_TEST_CASES; i++) {
-      const steps = generateSteps(rand, STEPS_PER_CASE);
-      try {
-        lagging += await testMatchesReducer(steps);
-      } catch (e) {
-        console.log(`
-Failed fuzzy test case:
-
-${JSON.stringify(steps, null, 2)}
-
-Random seed is ${SEED}
-`);
-        throw e;
-      }
+      await testRules(generateSteps(rand, STEPS_PER_CASE));
     }
-    // Waiting on a Transition useReducer does not is rare, not the rule.
-    expect(lagging).toBeLessThan(
-      (NUMBER_OF_TEST_CASES * (STEPS_PER_CASE + 1)) / 20,
-    );
   });
 });
