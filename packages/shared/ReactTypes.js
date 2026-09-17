@@ -88,12 +88,12 @@ export type ReactStore<S, A> = {
   // Notified synchronously after each dispatch. The lane is only passed when
   // React schedules the reader itself.
   _readers: Set<(isTransition: boolean, lane?: number) => void>,
-  // Keyed by FiberRoot, while a Transition is pending: the lanes a root has not
-  // yet committed it at, or no lanes once it has.
+  // Keyed by FiberRoot while a Transition is pending: the Transition lanes the
+  // root has not committed yet, or NoLanes once it has.
   _roots: Map<mixed, number>,
   _rootsBehind: number,
   // DEV only: readers rendered inside StrictMode.
-  _strictReaders: number,
+  _strictReaders?: number,
 };
 
 export type ReactPortal = {

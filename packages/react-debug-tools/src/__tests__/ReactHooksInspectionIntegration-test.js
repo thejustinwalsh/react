@@ -2393,6 +2393,29 @@ describe('ReactHooksInspectionIntegration', () => {
     `);
   });
 
+  // @gate enableStore
+  it('should support composite useStore hook', async () => {
+    const store = React.createStore({count: 1});
+    function Foo() {
+      const count = React.useStore(store, state => state.count);
+      React.useMemo(() => 'memo', []);
+      return count;
+    }
+
+    let renderer;
+    await act(() => {
+      renderer = ReactTestRenderer.create(<Foo />, {
+        unstable_isConcurrent: true,
+      });
+    });
+    const childFiber = renderer.root.findByType(Foo)._currentFiber();
+    const tree = ReactDebugTools.inspectHooksOfFiber(childFiber);
+    expect(tree.map(hook => [hook.id, hook.name, hook.value])).toEqual([
+      [0, 'Store', 1],
+      [1, 'Memo', 'memo'],
+    ]);
+  });
+
   it('should support composite useSyncExternalStore hook', async () => {
     const useSyncExternalStore = React.useSyncExternalStore;
     function Foo() {

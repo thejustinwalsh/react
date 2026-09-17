@@ -166,7 +166,11 @@ import {isCurrentTreeHidden} from './ReactFiberHiddenContext';
 import {requestCurrentTransition} from './ReactFiberTransition';
 
 import {callComponentInDEV} from './ReactFiberCallUserSpace';
-import {getStoreVersion, getPendingStoreLanes} from './ReactFiberStore';
+import {
+  getStoreVersion,
+  getPendingStoreLanes,
+  queueTransitionStores,
+} from './ReactFiberStore';
 
 import {scheduleGesture} from './ReactFiberGestureScheduler';
 
@@ -1916,12 +1920,11 @@ function checkIfSnapshotChanged<T>(inst: StoreInstance<T>): boolean {
   }
 }
 
-function forceStoreRerender(fiber: Fiber, lane: Lane): FiberRoot | null {
+function forceStoreRerender(fiber: Fiber, lane: Lane) {
   const root = enqueueConcurrentRenderForLane(fiber, lane);
   if (root !== null) {
     scheduleUpdateOnFiber(root, fiber, lane);
   }
-  return root;
 }
 
 type StoreReader<S, T> = {
@@ -1960,8 +1963,10 @@ function renderStore<S, T>(
   selector: void | ((state: S, previous: T | void) => T),
 ): S | T {
   const fiber = currentlyRenderingFiber;
-  let inst = prevInst;
-  if (inst === null) {
+  let root: FiberRoot;
+  if (prevInst !== null) {
+    root = prevInst.root;
+  } else {
     // Mounting, or reading a different store: start a fresh selection.
     if (__DEV__) {
       const maybeStore: mixed = store;
@@ -1973,16 +1978,14 @@ function renderStore<S, T>(
         console.error('useStore expects a store created by createStore.');
       }
     }
-    const root = getWorkInProgressRoot();
-    if (root === null) {
+    const workInProgressRoot = getWorkInProgressRoot();
+    if (workInProgressRoot === null) {
       throw new Error(
         'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
       );
     }
-    inst = {store, root, selector: null as any, value: null as any};
-    hook.queue = inst;
+    root = workInProgressRoot;
   }
-  const root = inst.root;
   const actualSelector: (state: S, previous: T | void) => T =
     selector === undefined ? (selectState as any) : selector;
   const isHydrating = getIsHydrating();
@@ -2018,14 +2021,21 @@ function renderStore<S, T>(
     }
   }
 
-  const subscribe = subscribeToReactStore.bind(null, fiber, inst, store);
+  let inst = prevInst;
+  if (inst === null) {
+    inst = {store, root, selector: actualSelector, value};
+    hook.queue = inst;
+  }
+  const subscribe = subscribeToReactStore.bind(null, fiber, inst);
   if (currentHook === null) {
     mountLayoutEffect(subscribe, [store]);
   } else {
     updateLayoutEffect(subscribe, [store]);
   }
   const instanceChanged =
-    inst.selector !== actualSelector || !is(inst.value, value);
+    prevInst === null ||
+    inst.selector !== actualSelector ||
+    !is(inst.value, value);
   // Always in the effect list, so that revealing a hidden Activity tree checks
   // for actions dispatched while it was hidden.
   pushSimpleEffect(
@@ -2067,24 +2077,26 @@ function updateStoreReader<S, T>(
 function subscribeToReactStore<S, T>(
   fiber: Fiber,
   inst: StoreReader<S, T>,
-  store: ReactStore<S, mixed>,
 ): () => void {
-  const onStoreChange = (isTransition: boolean, lane?: Lane) =>
-    handleStoreReaderChange(
-      fiber,
-      inst,
-      isTransition,
-      lane === undefined ? requestUpdateLane(fiber) : lane,
-    );
+  const store = inst.store;
+  const onStoreChange = (isTransition: boolean, lane?: Lane) => {
+    if (lane === undefined) {
+      const dispatchLane = requestUpdateLane(fiber);
+      startUpdateTimerByLane(dispatchLane, 'store.dispatch()', fiber);
+      handleStoreReaderChange(fiber, inst, isTransition, dispatchLane);
+    } else {
+      handleStoreReaderChange(fiber, inst, isTransition, lane);
+    }
+  };
   store._readers.add(onStoreChange);
   const isStrict = __DEV__ && (fiber.mode & StrictLegacyMode) !== NoMode;
   if (isStrict) {
-    store._strictReaders++;
+    store._strictReaders = (store._strictReaders || 0) + 1;
   }
   return () => {
     store._readers.delete(onStoreChange);
     if (isStrict) {
-      store._strictReaders--;
+      store._strictReaders = (store._strictReaders || 0) - 1;
     }
   };
 }
@@ -2099,17 +2111,16 @@ function handleStoreReaderChange<S, T>(
   const head = store._head;
   if (isTransitionLane(lane)) {
     if (!isStoreSelectionEqual(inst, head)) {
-      startUpdateTimerByLane(lane, 'store.dispatch()', fiber);
       forceStoreRerender(fiber, lane);
     }
     return;
   }
-  // A Transition this fiber cannot render as one shows every action.
+  // A Transition dispatch that this fiber received at a non-Transition lane, as
+  // in a legacy root, renders the latest state.
   const version = isTransition
     ? head
     : readStoreVersion(fiber, store, inst.root, NoLanes);
   if (!isStoreSelectionEqual(inst, version)) {
-    startUpdateTimerByLane(lane, 'store.dispatch()', fiber);
     forceStoreRerender(fiber, lane);
   }
   if (version !== head && !isStoreSelectionEqual(inst, head)) {
@@ -2439,6 +2450,11 @@ function runActionStateAction<S, P>(
       }
       handleActionReturnValue(actionQueue, node, returnValue);
     } catch (error) {
+      if (enableStore && currentTransition.stores !== null) {
+        // Stores dispatched to before the error still render with the
+        // Transition.
+        queueTransitionStores(currentTransition.stores);
+      }
       onActionError(actionQueue, node, error);
     } finally {
       if (prevTransition !== null && currentTransition.types !== null) {
@@ -3430,6 +3446,11 @@ function startTransition<S>(
       );
     }
   } catch (error) {
+    if (enableStore && currentTransition.stores !== null) {
+      // Stores dispatched to before the error still render with the
+      // Transition.
+      queueTransitionStores(currentTransition.stores);
+    }
     // This is a trick to get the `useTransition` hook to rethrow the error.
     // When it unwraps the thenable with the `use` algorithm, the error
     // will be thrown.

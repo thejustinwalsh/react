@@ -21,6 +21,7 @@ import {
   enableYieldingBeforePassive,
   enableGestureTransition,
   enableDefaultTransitionIndicator,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import {
   NoLane,
@@ -82,6 +83,7 @@ import {
   syncNestedUpdateFlag,
 } from './ReactProfilerTimer';
 import {peekEntangledActionLane} from './ReactFiberAsyncAction';
+import {markTransitionStoreRoots} from './ReactFiberStore';
 
 import noop from 'shared/noop';
 import reportGlobalError from 'shared/reportGlobalError';
@@ -193,6 +195,11 @@ function flushSyncWorkAcrossRoots_impl(
     return;
   }
 
+  if (enableStore) {
+    // flushSync can render before the scheduling microtask runs.
+    markTransitionStoreRoots(firstScheduledRoot, currentEventTransitionLane);
+  }
+
   if (!mightHavePendingSyncWork) {
     // Fast path. There's no sync work to do.
     return;
@@ -262,6 +269,10 @@ function processRootScheduleInMicrotask() {
   didScheduleMicrotask = false;
   if (__DEV__) {
     didScheduleMicrotask_act = false;
+  }
+
+  if (enableStore) {
+    markTransitionStoreRoots(firstScheduledRoot, currentEventTransitionLane);
   }
 
   // We'll recompute this as we iterate through all the roots and schedule them.

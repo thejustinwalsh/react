@@ -34,7 +34,7 @@ export function createStore<S, A>(
     reducer === undefined ? (basicStateReducer as any) : reducer;
   const initial: StoreVersion<S> = {state: initialState};
   const reduce = (state: S, action: A): S => {
-    if (__DEV__ && store._strictReaders > 0) {
+    if (__DEV__ && (store._strictReaders || 0) > 0) {
       // Like StrictMode does for useReducer, surface an impure reducer by
       // calling it twice.
       actualReducer(state, action);
@@ -122,7 +122,9 @@ export function createStore<S, A>(
     _readers: new Set(),
     _roots: new Map(),
     _rootsBehind: 0,
-    _strictReaders: 0,
   };
+  if (__DEV__) {
+    store._strictReaders = 0;
+  }
   return store;
 }

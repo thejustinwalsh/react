@@ -19,11 +19,6 @@ import {
   intersectLanes,
   mergeLanes,
 } from './ReactFiberLane';
-import {
-  didCurrentEventScheduleTransition,
-  firstScheduledRoot,
-  requestTransitionLane,
-} from './ReactFiberRootScheduler';
 
 // Stores with a root that has not committed a Transition toward their latest
 // state. Held only until those roots commit.
@@ -76,21 +71,38 @@ function markStoreRootBehind<S, A>(
   }
 }
 
-// Called when a Transition scope that dispatched to these stores finishes. A
-// root that scheduled work at the Transition's lane renders the stores'
+// Stores dispatched to inside a Transition during the current event. Roots are
+// marked when the event's work is scheduled, after every Transition scope in
+// the event has finished, including nested and throwing ones.
+let pendingTransitionStores: Set<ReactStore<any, any>> | null = null;
+
+export function queueTransitionStores(stores: Set<ReactStore<any, any>>): void {
+  if (pendingTransitionStores === null) {
+    pendingTransitionStores = new Set();
+  }
+  const pending = pendingTransitionStores;
+  stores.forEach(store => {
+    pending.add(store);
+  });
+}
+
+// A root that scheduled work at the event's Transition lane renders the stores'
 // latest state with that work, even if nothing in it read the stores yet.
 export function markTransitionStoreRoots(
-  stores: Set<ReactStore<any, any>>,
+  firstRoot: FiberRoot | null,
+  transitionLane: Lane,
 ): void {
-  const lane = didCurrentEventScheduleTransition()
-    ? requestTransitionLane(null)
-    : NoLane;
+  const stores = pendingTransitionStores;
+  if (stores === null) {
+    return;
+  }
+  pendingTransitionStores = null;
   stores.forEach(store => {
-    if (lane !== NoLane) {
-      let root = firstScheduledRoot;
+    if (transitionLane !== NoLane) {
+      let root = firstRoot;
       while (root !== null) {
-        if (includesSomeLane(root.pendingLanes, lane)) {
-          markStoreRootBehind(store, root, lane);
+        if (includesSomeLane(root.pendingLanes, transitionLane)) {
+          markStoreRootBehind(store, root, transitionLane);
         }
         root = root.next;
       }

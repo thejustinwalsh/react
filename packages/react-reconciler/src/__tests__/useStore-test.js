@@ -14,6 +14,7 @@ let ReactNoop;
 let Scheduler;
 let act;
 let assertLog;
+let waitForAll;
 let createStore;
 let useStore;
 let useState;
@@ -22,10 +23,20 @@ let Suspense;
 let Activity;
 let flushSync;
 let textCache;
+let microtaskCount;
 
 describe('useStore', () => {
   beforeEach(() => {
     jest.resetModules();
+    microtaskCount = 0;
+    const queueMicrotask = global.queueMicrotask;
+    global.queueMicrotask = callback => {
+      microtaskCount++;
+      queueMicrotask(callback);
+    };
+    global.reportError = error => {
+      Scheduler.log('reportError: ' + error.message);
+    };
 
     React = require('react');
     ReactNoop = require('react-noop-renderer');
@@ -40,6 +51,7 @@ describe('useStore', () => {
     textCache = new Map();
 
     const InternalTestUtils = require('internal-test-utils');
+    waitForAll = InternalTestUtils.waitForAll;
     act = InternalTestUtils.act;
     assertLog = InternalTestUtils.assertLog;
   });
@@ -243,7 +255,6 @@ describe('useStore', () => {
       ),
     );
     assertLog(['home', 'count:0']);
-    assertLog([]);
 
     await act(() =>
       startTransition(() => store.dispatch(s => ({...s, page: 'about'}))),
@@ -256,7 +267,6 @@ describe('useStore', () => {
     assertLog(['count:1', 'Loading']);
     expect(root).toMatchRenderedOutput('homecount:1');
 
-    assertLog([]);
     await act(() => resolveText('about'));
     assertLog(['about']);
     expect(root).toMatchRenderedOutput('aboutcount:1');
@@ -289,7 +299,6 @@ describe('useStore', () => {
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
     assertLog(['1:A']);
-    assertLog([]);
 
     await act(() => startTransition(() => store.dispatch('B')));
     assertLog(['Loading']);
@@ -301,10 +310,8 @@ describe('useStore', () => {
     assertLog(['1:A', '2:A', 'Loading']);
     expect(root).toMatchRenderedOutput('1:A2:A');
 
-    assertLog([]);
     await act(() => {
       resolveText('1:B');
-      assertLog([]);
       resolveText('2:B');
     });
     assertLog(['1:B', '2:B']);
@@ -329,7 +336,6 @@ describe('useStore', () => {
     const rootB = ReactNoop.createRoot();
     await act(() => {
       rootA.render(<Fast />);
-      assertLog([]);
       rootB.render(
         <Suspense fallback={<Text text="Loading" />}>
           <Stalls />
@@ -458,10 +464,10 @@ describe('useStore', () => {
     expect(root).toMatchRenderedOutput('full:0,1slice:a0');
   });
 
-  async function renderTwoTransitions(readState) {
+  async function renderTwoTransitions(createStateSource) {
     const reducer = (state, action) => ({...state, [action.key]: action.value});
     const initial = {a: 'A0', b: 'B0'};
-    const [useTestState, dispatch] = readState(reducer, initial);
+    const [useTestState, dispatch] = createStateSource(reducer, initial);
     function App() {
       const state = useTestState();
       return (
@@ -587,12 +593,12 @@ describe('useStore', () => {
     assertLog(['0']);
 
     await act(() => root.render(<App mode="hidden" />));
-    Scheduler.unstable_clearLog();
+    assertLog(['0']);
     await act(() => store.dispatch(1));
-    Scheduler.unstable_clearLog();
+    assertLog([]);
 
     await act(() => root.render(<App mode="visible" />));
-    Scheduler.unstable_clearLog();
+    assertLog(['1']);
     expect(root).toMatchRenderedOutput('1');
   });
 
@@ -634,7 +640,7 @@ describe('useStore', () => {
 
     // The throw inside dispatch is caught and happens again in render.
     await act(() => store.dispatch(1));
-    Scheduler.unstable_clearLog();
+    assertLog(['Oops', 'Oops']);
     expect(root).toMatchRenderedOutput('Oops');
   });
 
@@ -673,7 +679,7 @@ describe('useStore', () => {
 
     // The latest state is already B, but the state on screen is not.
     await act(() => store.dispatch('B'));
-    Scheduler.unstable_clearLog();
+    assertLog(['Loading']);
     expect(root).toMatchRenderedOutput('Loading');
   });
 
@@ -780,9 +786,9 @@ describe('useStore', () => {
         </React.StrictMode>,
       ),
     );
-    Scheduler.unstable_clearLog();
+    assertLog(['0']);
     await act(() => strictStore.dispatch(1));
-    Scheduler.unstable_clearLog();
+    assertLog(['1']);
     expect(calls).toBe(__DEV__ ? 2 : 1);
     expect(strictStore.getState()).toBe(1);
 
@@ -847,7 +853,7 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
-  it('does not show a Transition with no readers to a blocking mount', async () => {
+  it('does not expose a readerless Transition to a blocking mount', async () => {
     const store = createStore(0);
     let setPage;
     function Page() {
@@ -925,5 +931,146 @@ describe('useStore', () => {
     await act(() => {});
     assertLog([]);
     expect(root).toMatchRenderedOutput('0');
+  });
+
+  // @gate enableStore
+  it('shows a Transition dispatched before its scope throws', async () => {
+    const store = createStore(0);
+    function App() {
+      return <Text text={String(useStore(store))} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['0']);
+
+    await act(() => {
+      startTransition(() => {
+        store.dispatch(1);
+        throw new Error('Oops');
+      });
+    });
+    assertLog(['reportError: Oops', '1']);
+    expect(root).toMatchRenderedOutput('1');
+  });
+
+  // @gate enableStore
+  it('does not expose a nested Transition before the outer one commits', async () => {
+    const store = createStore(0);
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    const rootA = ReactNoop.createRoot();
+    await act(() =>
+      rootA.render(
+        <Suspense fallback={<Text text="Loading" />}>
+          <Page />
+        </Suspense>,
+      ),
+    );
+    assertLog(['home']);
+
+    await act(() =>
+      startTransition(() => {
+        startTransition(() => store.dispatch(1));
+        setPage('about');
+      }),
+    );
+    assertLog(['Loading']);
+
+    // Root A is still waiting on the Transition, so a new reader elsewhere
+    // shows the state from before it.
+    const rootB = ReactNoop.createRoot();
+    await act(() => rootB.render(<Reader />));
+    assertLog(['n0']);
+    expect(rootB).toMatchRenderedOutput('n0');
+  });
+
+  // @gate enableStore
+  it('queues no more microtasks than useState for a Transition', async () => {
+    let setCount;
+    function StateReader() {
+      const [count, _setCount] = useState(0);
+      setCount = _setCount;
+      return <Text text={'state' + count} />;
+    }
+    const store = createStore(0);
+    function StoreReader() {
+      return <Text text={'store' + useStore(store)} />;
+    }
+    const root = ReactNoop.createRoot();
+    root.render(
+      <>
+        <StateReader />
+        <StoreReader />
+      </>,
+    );
+    await waitForAll(['state0', 'store0']);
+
+    microtaskCount = 0;
+    startTransition(() => setCount(1));
+    await waitForAll(['state1']);
+    const withState = microtaskCount;
+    expect(withState).toBeGreaterThan(0);
+
+    microtaskCount = 0;
+    startTransition(() => store.dispatch(1));
+    await waitForAll(['store1']);
+    expect(microtaskCount).toBe(withState);
+
+    // Nothing reads this store, so nothing is scheduled.
+    const unread = createStore(0);
+    microtaskCount = 0;
+    startTransition(() => unread.dispatch(1));
+    await waitForAll([]);
+    expect(microtaskCount).toBe(0);
+  });
+
+  // @gate enableStore
+  it('mounts a reader with flushSync in the same event as a Transition dispatch', async () => {
+    const store = createStore(0);
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    let showReader;
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    function Other() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <Reader /> : <Text text="n-" />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <>
+          <Suspense fallback={<Text text="Loading" />}>
+            <Page />
+          </Suspense>
+          <Other />
+        </>,
+      ),
+    );
+    assertLog(['home', 'n-']);
+
+    await act(() => {
+      startTransition(() => {
+        store.dispatch(10);
+        setPage('about');
+      });
+      flushSync(() => showReader(true));
+    });
+    // The reader mounts before the Transition, then renders with it.
+    assertLog(['n0', 'Loading', 'n10']);
+    expect(root).toMatchRenderedOutput('homen0');
   });
 });

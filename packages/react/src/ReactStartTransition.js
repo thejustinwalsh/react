@@ -12,9 +12,9 @@ import type {
   StartTransitionOptions,
   GestureProvider,
   GestureOptions,
+  ReactStore,
 } from 'shared/ReactTypes';
 import type {TransitionTypes} from './ReactTransitionType';
-import type {ReactStore} from 'shared/ReactTypes';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 
@@ -98,6 +98,13 @@ export function startTransition(
       returnValue.then(noop, reportGlobalError);
     }
   } catch (error) {
+    if (enableStore && currentTransition.stores !== null) {
+      // Stores dispatched to before the error still render with the Transition.
+      const onStartTransitionFinish = ReactSharedInternals.S;
+      if (onStartTransitionFinish !== null) {
+        onStartTransitionFinish(currentTransition, undefined);
+      }
+    }
     reportGlobalError(error);
   } finally {
     warnAboutTransitionSubscriptions(prevTransition, currentTransition);
@@ -144,9 +151,6 @@ export function startGestureTransition(
   }
   const prevTransition = ReactSharedInternals.T;
   const currentTransition: Transition = {} as any;
-  if (enableStore) {
-    currentTransition.stores = null;
-  }
   if (enableViewTransition) {
     currentTransition.types = null;
   }
