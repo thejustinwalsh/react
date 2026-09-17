@@ -898,4 +898,32 @@ describe('useStore', () => {
     assertLog(['about', 'n10']);
     expect(root).toMatchRenderedOutput('aboutn10');
   });
+
+  // @gate enableStore && enableGestureTransition
+  it('throws like setState when dispatching inside a gesture Transition', async () => {
+    const store = createStore(0);
+    function App() {
+      return <Text text={String(useStore(store))} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['0']);
+
+    let error;
+    React.unstable_startGestureTransition({}, () => {
+      try {
+        store.dispatch(1);
+      } catch (x) {
+        error = x;
+      }
+    });
+    expect(error.message).toContain(
+      'Cannot setState on regular state inside a startGestureTransition.',
+    );
+    // Nothing changed, so nothing renders.
+    expect(store.getState()).toBe(0);
+    await act(() => {});
+    assertLog([]);
+    expect(root).toMatchRenderedOutput('0');
+  });
 });

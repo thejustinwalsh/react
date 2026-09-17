@@ -12,6 +12,7 @@ import type {ReactStore, StoreVersion} from 'shared/ReactTypes';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {REACT_STORE_TYPE} from 'shared/ReactSymbols';
 import is from 'shared/objectIs';
+import {enableGestureTransition} from 'shared/ReactFeatureFlags';
 
 function basicStateReducer<S>(state: S, action: S | (S => S)): S {
   // $FlowFixMe[incompatible-use]: Flow doesn't like mixed types
@@ -47,9 +48,22 @@ export function createStore<S, A>(
       return store._head.state;
     },
     dispatch(action: A): void {
+      const transition = ReactSharedInternals.T;
+      if (
+        enableGestureTransition &&
+        transition !== null &&
+        transition.gesture
+      ) {
+        throw new Error(
+          'Cannot setState on regular state inside a startGestureTransition. ' +
+            'Gestures can only update the useOptimistic() hook. There should be no ' +
+            'side-effects associated with starting a Gesture until its Action is ' +
+            'invoked. Move side-effects to the Action instead.',
+        );
+      }
       const head = store._head;
       const sync = store._sync;
-      const isTransition = ReactSharedInternals.T !== null;
+      const isTransition = transition !== null;
 
       const headState = reduce(head.state, action);
       const nextHead: StoreVersion<S> = is(headState, head.state)
@@ -76,14 +90,9 @@ export function createStore<S, A>(
       store._head = nextHead;
       store._sync = nextSync;
       // The renderer marks the roots this Transition scheduled work on when
-      // its scope finishes. Gesture Transitions have no such step.
-      const transition = ReactSharedInternals.T;
+      // its scope finishes.
       let isMarkedByRenderer = false;
-      if (
-        transition !== null &&
-        !transition.gesture &&
-        ReactSharedInternals.S !== null
-      ) {
+      if (transition !== null && ReactSharedInternals.S !== null) {
         isMarkedByRenderer = true;
         if (transition.stores === null) {
           transition.stores = new Set();
