@@ -640,6 +640,147 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
+  it('judges a dispatch from a layout effect with the selector that rendered', async () => {
+    const store = createStore({a: 0, b: 0});
+    let setKey;
+    function Dispatcher({isArmed}) {
+      React.useLayoutEffect(() => {
+        if (isArmed) {
+          store.dispatch(s => ({...s, b: 1}));
+        }
+      }, [isArmed]);
+      return null;
+    }
+    function Reader({field}) {
+      const value = useStore(store, s => s[field]);
+      return <Text text={field + '=' + value} />;
+    }
+    function App() {
+      const [key, _setKey] = useState('a');
+      setKey = _setKey;
+      return (
+        <>
+          <Dispatcher isArmed={key === 'b'} />
+          <Reader field={key} />
+        </>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['a=0']);
+
+    await act(() => setKey('b'));
+    assertLog(['b=0', 'b=1']);
+    expect(root).toMatchRenderedOutput('b=1');
+  });
+
+  // @gate enableStore
+  it('commits a Transition that suspends on a promise in the store once it resolves', async () => {
+    let resolveCount;
+    function countLater(count) {
+      return new Promise(resolve => {
+        resolveCount = () => resolve(count);
+      });
+    }
+    const store = createStore(countLater(0));
+    let setCount;
+    function Count({promise}) {
+      return <Text text={'count:' + React.use(promise)} />;
+    }
+    function App() {
+      const [count, _setCount] = useState(0);
+      setCount = _setCount;
+      const promise = useStore(store);
+      return (
+        <>
+          <Text text={'clicked:' + count} />
+          <Suspense fallback={<Text text="Loading" />}>
+            <Count promise={promise} />
+          </Suspense>
+        </>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    Scheduler.unstable_clearLog();
+    await act(() => resolveCount());
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('clicked:0count:0');
+
+    await act(() => {
+      setCount(1);
+      startTransition(() => store.dispatch(() => countLater(1)));
+    });
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('clicked:1count:0');
+
+    await act(() => resolveCount());
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('clicked:1count:1');
+  });
+
+  // @gate enableStore
+  it('mounts a reader during a pending Transition at what the tree shows, and joins it', async () => {
+    const store = createStore(1);
+    function Gated() {
+      const n = useStore(store);
+      return n === 2 ? <AsyncText text="2" /> : <Text text={String(n)} />;
+    }
+    function Late() {
+      return <Text text={'late:' + useStore(store)} />;
+    }
+    let setIsShown;
+    function App() {
+      const [isShown, _setIsShown] = useState(false);
+      setIsShown = _setIsShown;
+      return (
+        <Suspense fallback={<Text text="loading" />}>
+          <Gated />
+          {isShown ? <Late /> : null}
+        </Suspense>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['1']);
+    await act(() => startTransition(() => store.dispatch(2)));
+    assertLog(['loading']);
+    expect(root).toMatchRenderedOutput('1');
+
+    // Mounts at what the tree shows, then joins the Transition, which renders
+    // again and is still waiting for data.
+    await act(() => setIsShown(true));
+    assertLog(['1', 'late:1', 'late:2', 'loading']);
+    expect(root).toMatchRenderedOutput('1late:1');
+
+    await act(() => resolveText('2'));
+    assertLog(['2', 'late:2']);
+    expect(root).toMatchRenderedOutput('2late:2');
+  });
+
+  // @gate enableStore
+  it('does not render a reader that switched stores for a change it does not select', async () => {
+    const first = createStore({a: 0, b: 0});
+    const second = createStore({a: 0, b: 0});
+    function Reader({store}) {
+      return <Text text={'a=' + useStore(store, s => s.a)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<Reader store={first} />));
+    assertLog(['a=0']);
+    await act(() => root.render(<Reader store={second} />));
+    assertLog(['a=0']);
+
+    await act(() => second.dispatch(s => ({...s, b: 1})));
+    assertLog([]);
+    await act(() => second.dispatch(s => ({...s, a: 1})));
+    assertLog(['a=1']);
+  });
+
+  // @gate enableStore
   it('throws selector errors during render', async () => {
     const store = createStore(0);
     class ErrorBoundary extends React.Component {

@@ -97,7 +97,9 @@ export function createStore<S, A>(
         action,
         version: null,
         head,
+        nextHead,
         sync: isTransition ? null : sync,
+        nextSync,
       };
       const readers = Array.from(store._readers);
       for (let i = 0; i < readers.length; i++) {

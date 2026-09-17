@@ -1940,12 +1940,13 @@ type StoreReader<S, T> = {
   store: ReactStore<S, mixed>,
   root: FiberRoot,
   // Updated in the passive phase.
-  selector: (state: S, previous: T | void) => T,
   value: T,
   // The version the queue started from, while it is missing actions that
   // were dispatched before it. Updated in the passive phase.
   version: StoreVersion<S> | null,
-  // Updated during render, like `queue.lastRenderedState`.
+  // Updated during render, like `queue.lastRenderedReducer`, so an action
+  // dispatched during the commit is judged with the selector that rendered.
+  lastRenderedSelector: (state: S, previous: T | void) => T,
   lastRenderedValue: T,
   // A reader hidden by Activity is unsubscribed, so its queue misses actions.
   isSubscribed: boolean,
@@ -1965,9 +1966,22 @@ function reduceStoreUpdate<S, A>(
   update: StoreUpdate<S, A>,
 ): S {
   const version = update.version;
-  return version !== null
-    ? version.state
-    : store._reducer(state, update.action as any);
+  if (version !== null) {
+    return version.state;
+  }
+  // Reduced from a state the store already reduced it from, the result is the
+  // store's. StrictMode calls the reducer again to surface an impure one.
+  if (!__DEV__ || !shouldDoubleInvokeUserFnsInHooksDEV) {
+    const head = update.head;
+    if (head !== null && is(state, head.state)) {
+      return (update.nextHead as any).state;
+    }
+    const sync = update.sync;
+    if (sync !== null && is(state, sync.state)) {
+      return (update.nextSync as any).state;
+    }
+  }
+  return store._reducer(state, update.action as any);
 }
 
 function mountStore<S, T>(
@@ -2000,9 +2014,9 @@ function mountStore<S, T>(
   const reader: StoreReader<S, T> = {
     store,
     root,
-    selector: actualSelector,
     value,
     version: null,
+    lastRenderedSelector: actualSelector,
     lastRenderedValue: value,
     isSubscribed: false,
   };
@@ -2016,15 +2030,7 @@ function mountStore<S, T>(
   pushSimpleEffect(
     HookHasEffect | HookPassive,
     createEffectInstance(),
-    updateStoreReader.bind(
-      null,
-      fiber,
-      hook.queue,
-      reader,
-      actualSelector,
-      value,
-      version,
-    ),
+    updateStoreReader.bind(null, fiber, hook.queue, reader, value, version),
     null,
   );
   return value;
@@ -2096,38 +2102,28 @@ function updateStore<S, T>(
     reader = {
       store,
       root: reader.root,
-      selector: actualSelector,
       value,
       version: null,
+      lastRenderedSelector: actualSelector,
       lastRenderedValue: value,
       isSubscribed: false,
     };
     readerHook.queue = reader;
   } else {
+    reader.lastRenderedSelector = actualSelector;
     reader.lastRenderedValue = value;
   }
 
   updateEffect(subscribeToReactStore.bind(null, fiber, hook.queue, reader), [
     store,
   ]);
-  const readerChanged =
-    version !== null ||
-    reader.selector !== actualSelector ||
-    !is(reader.value, value);
+  const readerChanged = version !== null || !is(reader.value, value);
   // Always in the effect list, so that revealing a hidden Activity tree checks
   // for actions dispatched while it was unsubscribed.
   pushSimpleEffect(
     readerChanged ? HookHasEffect | HookPassive : HookPassive,
     createEffectInstance(),
-    updateStoreReader.bind(
-      null,
-      fiber,
-      hook.queue,
-      reader,
-      actualSelector,
-      value,
-      version,
-    ),
+    updateStoreReader.bind(null, fiber, hook.queue, reader, value, version),
     null,
   );
   if (readerChanged) {
@@ -2218,11 +2214,9 @@ function updateStoreReader<S, T>(
   fiber: Fiber,
   queue: UpdateQueue<S, StoreUpdate<S, mixed>>,
   reader: StoreReader<S, T>,
-  selector: (state: S, previous: T | void) => T,
   value: T,
   version: StoreVersion<S> | null,
 ): void {
-  reader.selector = selector;
   reader.value = value;
   if (version !== null) {
     // Actions dispatched between reading the store and subscribing to it are
@@ -2251,7 +2245,9 @@ function subscribeToReactStore<S, T>(
             action: undefined,
             version: readStoreVersion(fiber, store, reader.root, NoLanes),
             head: null,
+            nextHead: null,
             sync: null,
+            nextSync: null,
           },
           lane === undefined ? SyncLane : lane,
         );
@@ -2285,7 +2281,14 @@ function checkStoreReader<S, T>(
       fiber,
       queue,
       reader,
-      {action: undefined, version, head: null, sync: null},
+      {
+        action: undefined,
+        version,
+        head: null,
+        nextHead: null,
+        sync: null,
+        nextSync: null,
+      },
       SyncLane,
     );
   }
@@ -2305,7 +2308,14 @@ function checkStoreReader<S, T>(
         fiber,
         queue,
         reader,
-        {action: undefined, version: head, head: null, sync: null},
+        {
+          action: undefined,
+          version: head,
+          head: null,
+          nextHead: null,
+          sync: null,
+          nextSync: null,
+        },
         joinLane,
       );
       if (pendingLanes === NoLanes) {
@@ -2343,17 +2353,12 @@ function dispatchStoreUpdate<S, T>(
     try {
       const store = reader.store;
       const lastRenderedState: S = queue.lastRenderedState as any;
-      const eagerState =
-        action.head !== null && is(lastRenderedState, action.head.state)
-          ? store._head.state
-          : action.sync !== null && is(lastRenderedState, action.sync.state)
-            ? store._sync.state
-            : reduceStoreUpdate(store, lastRenderedState, action);
+      const eagerState = reduceStoreUpdate(store, lastRenderedState, action);
       update.hasEagerState = true;
       update.eagerState = eagerState;
       if (
         is(
-          reader.selector(eagerState, reader.lastRenderedValue),
+          reader.lastRenderedSelector(eagerState, reader.lastRenderedValue),
           reader.lastRenderedValue,
         )
       ) {

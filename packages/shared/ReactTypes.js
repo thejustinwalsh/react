@@ -78,10 +78,12 @@ export type StoreVersion<S> = {
 export type StoreUpdate<S, A> = {
   action: A | void,
   version: StoreVersion<S> | null,
-  // The versions the store reduced the action from. A reader showing one of
-  // them reuses the store's result.
+  // What the store reduced the action to, from its latest state and from the
+  // state a root shows. A reader reducing it from either reuses the result.
   head: StoreVersion<S> | null,
+  nextHead: StoreVersion<S> | null,
   sync: StoreVersion<S> | null,
+  nextSync: StoreVersion<S> | null,
 };
 
 export type ReactStore<S, A> = {
