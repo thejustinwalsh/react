@@ -22,6 +22,7 @@ import {
   enableTransitionTracing,
   enableViewTransition,
   enableGestureTransition,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import {isPrimaryRenderer} from './ReactFiberConfig';
 import {createCursor, push, pop} from './ReactFiberStack';
@@ -48,6 +49,7 @@ import {
 } from './ReactFiberAsyncAction';
 import {startAsyncTransitionTimer} from './ReactProfilerTimer';
 import {firstScheduledRoot} from './ReactFiberRootScheduler';
+import {markTransitionStoreRoots} from './ReactFiberStore';
 import {
   startScheduledGesture,
   cancelScheduledGesture,
@@ -80,6 +82,12 @@ ReactSharedInternals.S = function onStartTransitionFinishForReconciler(
   transition: Transition,
   returnValue: mixed,
 ) {
+  if (enableStore) {
+    const stores = transition.stores;
+    if (stores !== null) {
+      markTransitionStoreRoots(stores);
+    }
+  }
   markTransitionStarted();
   if (
     typeof returnValue === 'object' &&

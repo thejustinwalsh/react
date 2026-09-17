@@ -75,12 +75,27 @@ export function createStore<S, A>(
 
       store._head = nextHead;
       store._sync = nextSync;
+      // The renderer marks the roots this Transition scheduled work on when
+      // its scope finishes. Gesture Transitions have no such step.
+      const transition = ReactSharedInternals.T;
+      let isMarkedByRenderer = false;
+      if (
+        transition !== null &&
+        !transition.gesture &&
+        ReactSharedInternals.S !== null
+      ) {
+        isMarkedByRenderer = true;
+        if (transition.stores === null) {
+          transition.stores = new Set();
+        }
+        transition.stores.add(store);
+      }
       const readers = Array.from(store._readers);
       for (let i = 0; i < readers.length; i++) {
         readers[i](isTransition);
       }
-      // No root rendered a Transition toward this state.
-      if (store._rootsBehind === 0) {
+      // Nothing waits on this dispatch, so the state on screen is the latest.
+      if (!isMarkedByRenderer && store._rootsBehind === 0) {
         store._sync = store._head;
         store._roots.clear();
       }

@@ -166,11 +166,7 @@ import {isCurrentTreeHidden} from './ReactFiberHiddenContext';
 import {requestCurrentTransition} from './ReactFiberTransition';
 
 import {callComponentInDEV} from './ReactFiberCallUserSpace';
-import {
-  getStoreVersion,
-  getPendingStoreLanes,
-  markStoreRootBehind,
-} from './ReactFiberStore';
+import {getStoreVersion, getPendingStoreLanes} from './ReactFiberStore';
 
 import {scheduleGesture} from './ReactFiberGestureScheduler';
 
@@ -2104,10 +2100,7 @@ function handleStoreReaderChange<S, T>(
   if (isTransitionLane(lane)) {
     if (!isStoreSelectionEqual(inst, head)) {
       startUpdateTimerByLane(lane, 'store.dispatch()', fiber);
-      const root = forceStoreRerender(fiber, lane);
-      if (root !== null) {
-        markStoreRootBehind(store, root, lane);
-      }
+      forceStoreRerender(fiber, lane);
     }
     return;
   }
@@ -2413,6 +2406,9 @@ function runActionStateAction<S, P>(
     // This is a fork of startTransition
     const prevTransition = ReactSharedInternals.T;
     const currentTransition: Transition = {} as any;
+    if (enableStore) {
+      currentTransition.stores = null;
+    }
     if (enableViewTransition) {
       currentTransition.types =
         prevTransition !== null
@@ -3352,6 +3348,9 @@ function startTransition<S>(
 
   const prevTransition = ReactSharedInternals.T;
   const currentTransition: Transition = {} as any;
+  if (enableStore) {
+    currentTransition.stores = null;
+  }
   if (enableViewTransition) {
     currentTransition.types =
       prevTransition !== null

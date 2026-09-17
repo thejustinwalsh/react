@@ -801,4 +801,101 @@ describe('useStore', () => {
     await act(() => strictStore.dispatch(1));
     expect(calls).toBe(1);
   });
+
+  // @gate enableStore
+  it('mounts a reader in the same Transition as a dispatch in another root', async () => {
+    const store = createStore(0);
+    function Stalls() {
+      const n = useStore(store);
+      if (n >= 10) {
+        readText('data');
+      }
+      return <Text text={'a' + n} />;
+    }
+    let showReader;
+    function NewReader() {
+      return <Text text={'b' + useStore(store)} />;
+    }
+    function App() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <NewReader /> : <Text text="b-" />;
+    }
+
+    const rootA = ReactNoop.createRoot();
+    const rootB = ReactNoop.createRoot();
+    await act(() => {
+      rootA.render(
+        <Suspense fallback={<Text text="Loading" />}>
+          <Stalls />
+        </Suspense>,
+      );
+      rootB.render(<App />);
+    });
+    assertLog(['a0', 'b-']);
+
+    await act(() =>
+      startTransition(() => {
+        store.dispatch(10);
+        showReader(true);
+      }),
+    );
+    // Root B commits the Transition, so its new reader shows the dispatch.
+    assertLog(['Loading', 'b10']);
+    expect(rootA).toMatchRenderedOutput('a0');
+    expect(rootB).toMatchRenderedOutput('b10');
+  });
+
+  // @gate enableStore
+  it('does not show a Transition with no readers to a blocking mount', async () => {
+    const store = createStore(0);
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    let showReader;
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    function Other() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <Reader /> : <Text text="n-" />;
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <>
+          <Suspense fallback={<Text text="Loading" />}>
+            <Page />
+          </Suspense>
+          <Other />
+        </>,
+      ),
+    );
+    assertLog(['home', 'n-']);
+
+    // Nothing reads the store yet. The Transition that updates it waits on
+    // data.
+    await act(() =>
+      startTransition(() => {
+        store.dispatch(10);
+        setPage('about');
+      }),
+    );
+    assertLog(['Loading']);
+
+    // A blocking render mounts a reader. The Transition has not committed.
+    await act(() => showReader(true));
+    // The new reader also renders with the Transition, which does not commit.
+    assertLog(['n0', 'Loading', 'n10']);
+    expect(root).toMatchRenderedOutput('homen0');
+
+    await act(() => resolveText('about'));
+    assertLog(['about', 'n10']);
+    expect(root).toMatchRenderedOutput('aboutn10');
+  });
 });

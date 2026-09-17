@@ -12,12 +12,18 @@ import type {FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
 
 import {
+  NoLane,
   NoLanes,
   SyncLane,
   includesSomeLane,
   intersectLanes,
   mergeLanes,
 } from './ReactFiberLane';
+import {
+  didCurrentEventScheduleTransition,
+  firstScheduledRoot,
+  requestTransitionLane,
+} from './ReactFiberRootScheduler';
 
 // Stores with a root that has not committed a Transition toward their latest
 // state. Held only until those roots commit.
@@ -55,7 +61,7 @@ export function getPendingStoreLanes<S, A>(
     : intersectLanes(root.pendingLanes, pendingLanes);
 }
 
-export function markStoreRootBehind<S, A>(
+function markStoreRootBehind<S, A>(
   store: ReactStore<S, A>,
   root: FiberRoot,
   lane: Lane,
@@ -68,6 +74,32 @@ export function markStoreRootBehind<S, A>(
   } else {
     store._roots.set(root, mergeLanes(pendingLanes, lane));
   }
+}
+
+// Called when a Transition scope that dispatched to these stores finishes. A
+// root that scheduled work at the Transition's lane renders the stores'
+// latest state with that work, even if nothing in it read the stores yet.
+export function markTransitionStoreRoots(
+  stores: Set<ReactStore<any, any>>,
+): void {
+  const lane = didCurrentEventScheduleTransition()
+    ? requestTransitionLane(null)
+    : NoLane;
+  stores.forEach(store => {
+    if (lane !== NoLane) {
+      let root = firstScheduledRoot;
+      while (root !== null) {
+        if (includesSomeLane(root.pendingLanes, lane)) {
+          markStoreRootBehind(store, root, lane);
+        }
+        root = root.next;
+      }
+    }
+    if (store._rootsBehind === 0) {
+      store._sync = store._head;
+      store._roots.clear();
+    }
+  });
 }
 
 // Called after a root commits. Once every root that rendered a store's
