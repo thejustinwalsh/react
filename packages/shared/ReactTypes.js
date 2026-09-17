@@ -78,13 +78,6 @@ export type StoreUpdate<S, A> = {
   state: S,
 };
 
-// A renderer with readers of a store.
-export type StoreRenderer = {
-  // Throws if the renderer cannot accept an update now. Every renderer is asked
-  // before any renderer receives the update.
-  validateStoreUpdate(): void,
-  receiveStoreUpdate(update: StoreUpdate<any, any>): void,
-};
 
 export type ReactStore<S, A> = {
   $$typeof: symbol | number,
@@ -94,9 +87,6 @@ export type ReactStore<S, A> = {
   // The state a server rendered from, when the store is created from it.
   _initialState: S,
   _reducer: (S, A) => S,
-  // Renderers with readers of the store, given each update before the store's
-  // state changes.
-  _renderers: Set<StoreRenderer>,
 };
 
 export type ReactPortal = {

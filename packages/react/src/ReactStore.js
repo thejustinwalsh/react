@@ -50,22 +50,16 @@ export function createStore<S, A>(
       }
       const previousState = state;
       const nextState = store._reducer(previousState, action);
-      const update = {store, action, previousState, state: nextState};
-      // Renderers get the update before the state changes. One that is
-      // rendering rejects it before any renderer has applied it. They get an
-      // update that changes nothing too, which can still apply to what a root
-      // shows.
-      const renderers = store._renderers;
-      renderers.forEach(renderer => renderer.validateStoreUpdate());
-      renderers.forEach(renderer => renderer.receiveStoreUpdate(update));
+      // Renderers get the update before the state changes, so one that is
+      // rendering can reject it. They get an update that changes nothing too,
+      // which can still apply to what a root shows. A server has no renderers.
+      const onStoreUpdate = ReactSharedInternals.U;
+      if (onStoreUpdate != null) {
+        onStoreUpdate({store, action, previousState, state: nextState});
+      }
       state = nextState;
       if (transition !== null) {
-        // A renderer that was not given the update picks it up when the
-        // Transition's scope finishes, if it renders the Transition.
-        if (transition.storeUpdates === undefined) {
-          transition.storeUpdates = [];
-        }
-        transition.storeUpdates.push(update);
+        transition.didUpdateStore = true;
       }
       if (!is(nextState, previousState)) {
         subscriptions.forEach(callback => callback());
@@ -79,7 +73,6 @@ export function createStore<S, A>(
     },
     _initialState: initialState,
     _reducer: reducer === undefined ? (basicStateReducer as any) : reducer,
-    _renderers: new Set(),
   };
   return store;
 }

@@ -2419,7 +2419,7 @@ function runActionStateAction<S, P>(
       }
       handleActionReturnValue(actionQueue, node, returnValue);
     } catch (error) {
-      if (enableStore && currentTransition.storeUpdates !== undefined) {
+      if (enableStore && currentTransition.didUpdateStore) {
         // Store updates dispatched before the action threw still commit, like
         // state updates do, so the renderers finish the Transition.
         const onStartTransitionFinish = ReactSharedInternals.S;
@@ -3415,7 +3415,7 @@ function startTransition<S>(
       );
     }
   } catch (error) {
-    if (enableStore && currentTransition.storeUpdates !== undefined) {
+    if (enableStore && currentTransition.didUpdateStore) {
       // Store updates dispatched before the scope threw still commit, like
       // state updates do, so the renderers finish the Transition.
       const onStartTransitionFinish = ReactSharedInternals.S;

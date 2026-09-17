@@ -825,6 +825,103 @@ describe('useStore in a Transition', () => {
   });
 
   // @gate enableStore
+  it('mounts a reader with flushSync inside the scope of a Transition that dispatched', async () => {
+    const store = createStore(0);
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    let showReader;
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    function Other() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <Reader /> : <Text text="n-" />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <>
+          <Suspense fallback={<Text text="Loading" />}>
+            <Page />
+          </Suspense>
+          <Other />
+        </>,
+      ),
+    );
+    assertLog(['home', 'n-']);
+
+    await act(() => {
+      startTransition(() => {
+        store.dispatch(10);
+        setPage('about');
+        flushSync(() => showReader(true));
+      });
+    });
+    // The reader mounts before the Transition commits, so it does not show it.
+    assertLog(['n0', 'Loading', 'n10']);
+    expect(root).toMatchRenderedOutput('homen0');
+
+    await act(() => resolveText('about'));
+    assertLog(['about', 'n10']);
+    expect(root).toMatchRenderedOutput('aboutn10');
+  });
+
+  // @gate enableStore
+  it('keeps the order of Transition actions dispatched before and after a reader mounts in the scope', async () => {
+    const store = createStore(0, (n, action) =>
+      action === 'double' ? n * 2 : n + 1,
+    );
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    let showReader;
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    function Other() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <Reader /> : <Text text="n-" />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <>
+          <Suspense fallback={<Text text="Loading" />}>
+            <Page />
+          </Suspense>
+          <Other />
+        </>,
+      ),
+    );
+    assertLog(['home', 'n-']);
+
+    await act(() => {
+      startTransition(() => {
+        store.dispatch('increment');
+        setPage('about');
+        flushSync(() => showReader(true));
+        store.dispatch('double');
+      });
+    });
+    expect(store.getState()).toBe(2);
+    assertLog(['n0', 'Loading', 'n2']);
+    expect(root).toMatchRenderedOutput('homen0');
+
+    await act(() => resolveText('about'));
+    assertLog(['about', 'n2']);
+    expect(root).toMatchRenderedOutput('aboutn2');
+  });
+
+  // @gate enableStore
   it('does not show a fallback for a Transition dispatched right after a reader commits', async () => {
     const store = createStore(0);
     function Reader() {

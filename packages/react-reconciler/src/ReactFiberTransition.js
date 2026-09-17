@@ -132,7 +132,7 @@ ReactSharedInternals.S = function onStartTransitionFinishForReconciler(
   }
   if (enableStore) {
     finishStoreTransition(
-      transition.storeUpdates,
+      transition,
       didCurrentEventScheduleTransition()
         ? requestTransitionLane(transition)
         : NoLane,
