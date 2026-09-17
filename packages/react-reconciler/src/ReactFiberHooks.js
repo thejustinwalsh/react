@@ -161,7 +161,10 @@ import {
   peekEntangledActionThenable,
   chainThenableValue,
 } from './ReactFiberAsyncAction';
-import {requestTransitionLane} from './ReactFiberRootScheduler';
+import {
+  ensureScheduleIsScheduled,
+  requestTransitionLane,
+} from './ReactFiberRootScheduler';
 import {isCurrentTreeHidden} from './ReactFiberHiddenContext';
 import {requestCurrentTransition} from './ReactFiberTransition';
 
@@ -1933,6 +1936,10 @@ type StoreReader<S, T> = {
   // Updated in the layout phase.
   selector: (state: S, previous: T | void) => T,
   value: T,
+  // Updated during render, like `queue.lastRenderedState`. A render that
+  // suspends commits hidden without running layout effects, so this can be
+  // newer than `value`. Only trusted when the fiber has no pending work.
+  lastRenderedValue: T,
 };
 
 function selectState<S>(state: S): S {
@@ -2023,14 +2030,25 @@ function renderStore<S, T>(
 
   let inst = prevInst;
   if (inst === null) {
-    inst = {store, root, selector: actualSelector, value};
+    inst = {
+      store,
+      root,
+      selector: actualSelector,
+      value,
+      lastRenderedValue: value,
+    };
     hook.queue = inst;
+  } else {
+    inst.lastRenderedValue = value;
   }
   const subscribe = subscribeToReactStore.bind(null, fiber, inst);
+  // Passive, like useSyncExternalStore: a Suspense boundary showing its
+  // fallback keeps the passive effects of its hidden content connected, so a
+  // hidden reader still hears about the update that reveals it.
   if (currentHook === null) {
-    mountLayoutEffect(subscribe, [store]);
+    mountEffect(subscribe, [store]);
   } else {
-    updateLayoutEffect(subscribe, [store]);
+    updateEffect(subscribe, [store]);
   }
   const instanceChanged =
     prevInst === null ||
@@ -2071,7 +2089,7 @@ function updateStoreReader<S, T>(
   inst.selector = selector;
   inst.value = value;
   // An action may have been dispatched between render and now.
-  handleStoreReaderChange(fiber, inst, false, SyncLane);
+  checkStoreReader(fiber, inst);
 }
 
 function subscribeToReactStore<S, T>(
@@ -2089,6 +2107,8 @@ function subscribeToReactStore<S, T>(
     }
   };
   store._readers.add(onStoreChange);
+  // An action may have been dispatched between the layout and passive phases.
+  checkStoreReader(fiber, inst);
   const isStrict = __DEV__ && (fiber.mode & StrictLegacyMode) !== NoMode;
   if (isStrict) {
     store._strictReaders = (store._strictReaders || 0) + 1;
@@ -2110,7 +2130,7 @@ function handleStoreReaderChange<S, T>(
   const store = inst.store;
   const head = store._head;
   if (isTransitionLane(lane)) {
-    if (!isStoreSelectionEqual(inst, head)) {
+    if (!canSkipStoreRender(fiber, inst, head)) {
       forceStoreRerender(fiber, lane);
     }
     return;
@@ -2120,10 +2140,10 @@ function handleStoreReaderChange<S, T>(
   const version = isTransition
     ? head
     : readStoreVersion(fiber, store, inst.root, NoLanes);
-  if (!isStoreSelectionEqual(inst, version)) {
+  if (!canSkipStoreRender(fiber, inst, version)) {
     forceStoreRerender(fiber, lane);
   }
-  if (version !== head && !isStoreSelectionEqual(inst, head)) {
+  if (version !== head && !isSameStoreSelection(inst, version, head)) {
     // Render with the root's pending Transition toward the latest state.
     const pendingLanes = getPendingStoreLanes(store, inst.root);
     if (pendingLanes !== NoLanes) {
@@ -2132,14 +2152,76 @@ function handleStoreReaderChange<S, T>(
   }
 }
 
-function isStoreSelectionEqual<S, T>(
+// Compares the store with what this reader committed, rather than with pending
+// work, which mid-Transition is always present.
+function checkStoreReader<S, T>(fiber: Fiber, inst: StoreReader<S, T>): void {
+  const store = inst.store;
+  const head = store._head;
+  const version = readStoreVersion(fiber, store, inst.root, NoLanes);
+  const committed = inst.value;
+  let isCommittedSelection;
+  try {
+    isCommittedSelection = is(
+      inst.selector(version.state, committed),
+      committed,
+    );
+  } catch (error) {
+    isCommittedSelection = false;
+  }
+  if (!isCommittedSelection) {
+    forceStoreRerender(fiber, SyncLane);
+  }
+  if (version !== head && !isSameStoreSelection(inst, version, head)) {
+    const pendingLanes = getPendingStoreLanes(store, inst.root);
+    const alternate = fiber.alternate;
+    const fiberLanes =
+      alternate === null
+        ? fiber.lanes
+        : mergeLanes(fiber.lanes, alternate.lanes);
+    if (
+      pendingLanes !== NoLanes &&
+      !includesSomeLane(fiberLanes, pendingLanes)
+    ) {
+      forceStoreRerender(fiber, getHighestPriorityLane(pendingLanes));
+    }
+  }
+}
+
+// Like the eager bailout for setState: only when nothing is pending on the
+// fiber is its last render the state it shows.
+function canSkipStoreRender<S, T>(
+  fiber: Fiber,
   inst: StoreReader<S, T>,
   version: StoreVersion<S>,
 ): boolean {
+  const alternate = fiber.alternate;
+  if (
+    fiber.lanes !== NoLanes ||
+    (alternate !== null && alternate.lanes !== NoLanes)
+  ) {
+    return false;
+  }
+  const rendered = inst.lastRenderedValue;
   try {
-    return is(inst.selector(version.state, inst.value), inst.value);
+    return is(inst.selector(version.state, rendered), rendered);
   } catch (error) {
     // Render calls the selector again and throws there.
+    return false;
+  }
+}
+
+function isSameStoreSelection<S, T>(
+  inst: StoreReader<S, T>,
+  version: StoreVersion<S>,
+  otherVersion: StoreVersion<S>,
+): boolean {
+  const previous = inst.lastRenderedValue;
+  try {
+    return is(
+      inst.selector(version.state, previous),
+      inst.selector(otherVersion.state, previous),
+    );
+  } catch (error) {
     return false;
   }
 }
@@ -2454,6 +2536,8 @@ function runActionStateAction<S, P>(
         // Stores dispatched to before the error still render with the
         // Transition.
         queueTransitionStores(currentTransition.stores);
+        ensureScheduleIsScheduled();
+        ensureScheduleIsScheduled();
       }
       onActionError(actionQueue, node, error);
     } finally {
@@ -3450,6 +3534,7 @@ function startTransition<S>(
       // Stores dispatched to before the error still render with the
       // Transition.
       queueTransitionStores(currentTransition.stores);
+      ensureScheduleIsScheduled();
     }
     // This is a trick to get the `useTransition` hook to rethrow the error.
     // When it unwraps the thenable with the `use` algorithm, the error

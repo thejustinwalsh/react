@@ -92,6 +92,9 @@ export type ReactStore<S, A> = {
   // root has not committed yet, or NoLanes once it has.
   _roots: Map<mixed, number>,
   _rootsBehind: number,
+  // A Transition in the current event dispatched to this store, and the
+  // renderer has not marked its roots yet.
+  _isTransitionQueued: boolean,
   // DEV only: readers rendered inside StrictMode.
   _strictReaders?: number,
 };

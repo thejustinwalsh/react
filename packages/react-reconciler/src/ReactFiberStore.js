@@ -17,6 +17,7 @@ import {
   SyncLane,
   includesSomeLane,
   intersectLanes,
+  markRootEntangled,
   mergeLanes,
 } from './ReactFiberLane';
 
@@ -98,11 +99,24 @@ export function markTransitionStoreRoots(
   }
   pendingTransitionStores = null;
   stores.forEach(store => {
+    store._isTransitionQueued = false;
     if (transitionLane !== NoLane) {
       let root = firstRoot;
       while (root !== null) {
         if (includesSomeLane(root.pendingLanes, transitionLane)) {
+          const storeLanes = store._roots.get(root);
           markStoreRootBehind(store, root, transitionLane);
+          if (storeLanes !== undefined && storeLanes !== NoLanes) {
+            // Like entangleTransitionUpdate for a hook queue: a store is one
+            // queue, so its pending Transitions in a root render together.
+            markRootEntangled(
+              root,
+              mergeLanes(
+                intersectLanes(storeLanes, root.pendingLanes),
+                transitionLane,
+              ),
+            );
+          }
         }
         root = root.next;
       }

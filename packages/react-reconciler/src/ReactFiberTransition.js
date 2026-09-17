@@ -48,7 +48,10 @@ import {
   peekEntangledActionLane,
 } from './ReactFiberAsyncAction';
 import {startAsyncTransitionTimer} from './ReactProfilerTimer';
-import {firstScheduledRoot} from './ReactFiberRootScheduler';
+import {
+  ensureScheduleIsScheduled,
+  firstScheduledRoot,
+} from './ReactFiberRootScheduler';
 import {queueTransitionStores} from './ReactFiberStore';
 import {
   startScheduledGesture,
@@ -86,6 +89,9 @@ ReactSharedInternals.S = function onStartTransitionFinishForReconciler(
     const stores = transition.stores;
     if (stores !== null) {
       queueTransitionStores(stores);
+      // Roots are marked when the event's work is scheduled, even if the
+      // dispatch scheduled none.
+      ensureScheduleIsScheduled();
     }
   }
   markTransitionStarted();

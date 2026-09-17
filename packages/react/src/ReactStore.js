@@ -8,6 +8,7 @@
  */
 
 import type {ReactStore, StoreVersion} from 'shared/ReactTypes';
+import type {Transition} from './ReactStartTransition';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {REACT_STORE_TYPE} from 'shared/ReactSymbols';
@@ -83,28 +84,38 @@ export function createStore<S, A>(
           }
         }
       }
+      // The renderer marks the roots this Transition scheduled work on when
+      // its scope finishes.
+      const isMarkedByRenderer =
+        transition !== null && ReactSharedInternals.S !== null;
       if (nextHead === head && nextSync === sync) {
+        // Like an update to a hook queue, a Transition on a store that already
+        // has one pending still entangles with it.
+        if (
+          transition !== null &&
+          isMarkedByRenderer &&
+          (store._rootsBehind > 0 || store._isTransitionQueued)
+        ) {
+          queueTransitionStore(transition, store);
+        }
         return;
       }
 
       store._head = nextHead;
       store._sync = nextSync;
-      // The renderer marks the roots this Transition scheduled work on when
-      // its scope finishes.
-      let isMarkedByRenderer = false;
-      if (transition !== null && ReactSharedInternals.S !== null) {
-        isMarkedByRenderer = true;
-        if (transition.stores === null) {
-          transition.stores = new Set();
-        }
-        transition.stores.add(store);
+      if (transition !== null && isMarkedByRenderer) {
+        queueTransitionStore(transition, store);
       }
       const readers = Array.from(store._readers);
       for (let i = 0; i < readers.length; i++) {
         readers[i](isTransition);
       }
       // Nothing waits on this dispatch, so the state on screen is the latest.
-      if (!isMarkedByRenderer && store._rootsBehind === 0) {
+      if (
+        !isMarkedByRenderer &&
+        !store._isTransitionQueued &&
+        store._rootsBehind === 0
+      ) {
         store._sync = store._head;
         store._roots.clear();
       }
@@ -122,9 +133,21 @@ export function createStore<S, A>(
     _readers: new Set(),
     _roots: new Map(),
     _rootsBehind: 0,
+    _isTransitionQueued: false,
   };
   if (__DEV__) {
     store._strictReaders = 0;
   }
   return store;
+}
+
+function queueTransitionStore<S, A>(
+  transition: Transition,
+  store: ReactStore<S, A>,
+): void {
+  store._isTransitionQueued = true;
+  if (transition.stores === null) {
+    transition.stores = new Set();
+  }
+  transition.stores.add(store);
 }

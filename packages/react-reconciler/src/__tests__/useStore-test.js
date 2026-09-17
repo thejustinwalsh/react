@@ -25,14 +25,19 @@ let flushSync;
 let textCache;
 let microtaskCount;
 
+const originalQueueMicrotask = global.queueMicrotask;
+
 describe('useStore', () => {
+  afterEach(() => {
+    global.queueMicrotask = originalQueueMicrotask;
+  });
+
   beforeEach(() => {
     jest.resetModules();
     microtaskCount = 0;
-    const queueMicrotask = global.queueMicrotask;
     global.queueMicrotask = callback => {
       microtaskCount++;
-      queueMicrotask(callback);
+      originalQueueMicrotask(callback);
     };
     global.reportError = error => {
       Scheduler.log('reportError: ' + error.message);
@@ -1023,12 +1028,13 @@ describe('useStore', () => {
     await waitForAll(['store1']);
     expect(microtaskCount).toBe(withState);
 
-    // Nothing reads this store, so nothing is scheduled.
+    // Nothing reads this store, but the scheduling pass still settles it: one
+    // microtask, as for any update.
     const unread = createStore(0);
     microtaskCount = 0;
     startTransition(() => unread.dispatch(1));
     await waitForAll([]);
-    expect(microtaskCount).toBe(0);
+    expect(microtaskCount).toBe(1);
   });
 
   // @gate enableStore
