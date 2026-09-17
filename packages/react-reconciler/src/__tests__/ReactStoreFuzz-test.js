@@ -93,6 +93,7 @@ describe('ReactStoreFuzz', () => {
       throw thenable;
     }
 
+    const ROOTS = 2;
     const initialState = {page: 'home', count: 0, filter: 'all'};
 
     function reducer(state, action) {
@@ -139,10 +140,10 @@ describe('ReactStoreFuzz', () => {
       function StoreFilter() {
         return <Filter filter={React.useStore(store, state => state.filter)} />;
       }
-      const app = {dispatch: store.dispatch, setExtraMounted: null, App: null};
-      app.App = function StoreApp() {
+      const app = {dispatch: store.dispatch, setExtraMounted: [], App: null};
+      app.App = function StoreApp({index}) {
         const [extraMounted, setExtraMounted] = React.useState(false);
-        app.setExtraMounted = setExtraMounted;
+        app.setExtraMounted[index] = setExtraMounted;
         return (
           <>
             <React.Suspense fallback="loading ">
@@ -156,14 +157,24 @@ describe('ReactStoreFuzz', () => {
       return app;
     }
 
-    // The same app with its state in React, above the tree.
+    // The same app with its state in React, above the tree of each root. An
+    // action is dispatched to every root in the same event.
     function createStateApp() {
-      const app = {dispatch: null, setExtraMounted: null, App: null};
-      app.App = function StateApp() {
+      const dispatchers = [];
+      const app = {
+        dispatch: action => {
+          for (let i = 0; i < dispatchers.length; i++) {
+            dispatchers[i](action);
+          }
+        },
+        setExtraMounted: [],
+        App: null,
+      };
+      app.App = function StateApp({index}) {
         const [extraMounted, setExtraMounted] = React.useState(false);
         const [state, dispatch] = React.useReducer(reducer, initialState);
-        app.setExtraMounted = setExtraMounted;
-        app.dispatch = dispatch;
+        app.setExtraMounted[index] = setExtraMounted;
+        dispatchers[index] = dispatch;
         return (
           <>
             <React.Suspense fallback="loading ">
@@ -177,8 +188,8 @@ describe('ReactStoreFuzz', () => {
       return app;
     }
 
-    // Runs the steps, then finishes every Action and loads all data. Returns
-    // the output of every commit, and the step it was committed in.
+    // Runs the steps in two roots, then finishes every Action and loads all
+    // data. Returns the output of every commit, with its root and step.
     async function run(createApp, steps) {
       // Lanes are assigned in a cycle, and React entangles them differently
       // depending on where in it they are, so every app starts at the same place.
@@ -186,19 +197,23 @@ describe('ReactStoreFuzz', () => {
       const app = createApp();
       textCache = new Map();
       let finishActions = [];
-      const root = ReactNoop.createRoot();
       const commits = [];
       let step = -1;
-      const onRender = () => {
-        commits.push({step, output: root.getChildrenAsJSX()});
-      };
-      await act(() =>
-        root.render(
-          <React.Profiler id="root" onRender={onRender}>
-            <app.App />
-          </React.Profiler>,
-        ),
-      );
+      const roots = [];
+      for (let index = 0; index < ROOTS; index++) {
+        const root = ReactNoop.createRoot();
+        roots.push(root);
+        const onRender = () => {
+          commits.push({root: index, step, output: root.getChildrenAsJSX()});
+        };
+        await act(() =>
+          root.render(
+            <React.Profiler id="root" onRender={onRender}>
+              <app.App index={index} />
+            </React.Profiler>,
+          ),
+        );
+      }
       const allSteps = withFinalStep(steps);
       for (step = 0; step < allSteps.length; step++) {
         await act(() => {
@@ -216,11 +231,11 @@ describe('ReactStoreFuzz', () => {
                 resolveText(action.text);
                 break;
               case 'mount':
-                app.setExtraMounted(action.mounted);
+                app.setExtraMounted[action.root || 0](action.mounted);
                 break;
               case 'transitionMount':
                 React.startTransition(() =>
-                  app.setExtraMounted(action.mounted),
+                  app.setExtraMounted[action.root || 0](action.mounted),
                 );
                 break;
               case 'asyncTransition':
@@ -258,7 +273,7 @@ describe('ReactStoreFuzz', () => {
     // the pending async Action's lane, or the next of React's ten Transition
     // lanes. An update that changes nothing may bail out without being queued,
     // so it may not be in its group.
-    function describeUpdates(steps) {
+    function describeUpdates(steps, root) {
       const updates = [];
       let latestState = initialState;
       let latestMounted = false;
@@ -320,6 +335,13 @@ describe('ReactStoreFuzz', () => {
             case 'mount':
             case 'transitionMount': {
               const isBlocking = a.kind === 'mount';
+              if ((a.root || 0) !== root) {
+                // Another root's update still claims the event's lane.
+                if (!isBlocking) {
+                  transitionGroup();
+                }
+                break;
+              }
               updates.push({
                 step: i,
                 queue: 'app',
@@ -497,8 +519,20 @@ describe('ReactStoreFuzz', () => {
       );
     }
 
-    function checkRules(steps, commits) {
-      const described = describeUpdates(withFinalStep(steps));
+    function checkRules(steps, allCommits) {
+      for (let root = 0; root < ROOTS; root++) {
+        const commits = allCommits.filter(commit => commit.root === root);
+        const error = checkRootRules(steps, commits, root);
+        if (error !== null) {
+          return `Root ${root}: ${error}`;
+        }
+      }
+      return null;
+    }
+
+    // Each root follows the rules on its own.
+    function checkRootRules(steps, commits, root) {
+      const described = describeUpdates(withFinalStep(steps), root);
       let error = null;
       for (
         let merged = 0;
@@ -575,7 +609,11 @@ describe('ReactStoreFuzz', () => {
       return (
         JSON.stringify(steps.map(({actions}) => actions)) +
         '\n\nCommits:\n' +
-        commits.map(({step, output}) => `  step ${step}: ${output}`).join('\n')
+        commits
+          .map(
+            ({root, step, output}) => `  root ${root}, step ${step}: ${output}`,
+          )
+          .join('\n')
       );
     }
 
@@ -620,9 +658,13 @@ describe('ReactStoreFuzz', () => {
           case 3:
             return {kind: 'resolve', text: PAGES[1 + rand(PAGES.length - 1)]};
           case 4:
-            return {kind: 'mount', mounted: rand(2) === 0};
+            return {kind: 'mount', mounted: rand(2) === 0, root: rand(ROOTS)};
           case 5:
-            return {kind: 'transitionMount', mounted: rand(2) === 0};
+            return {
+              kind: 'transitionMount',
+              mounted: rand(2) === 0,
+              root: rand(ROOTS),
+            };
           case 6:
             return {kind: 'asyncTransition', action: randomAction()};
           default:

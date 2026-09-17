@@ -46,9 +46,11 @@ export function getStoreVersion<S, A>(
   if (pendingLanes === undefined) {
     return sync;
   }
-  return pendingLanes === NoLanes || includesSomeLane(lanes, pendingLanes)
-    ? head
-    : sync;
+  if (pendingLanes === NoLanes || includesSomeLane(lanes, pendingLanes)) {
+    return head;
+  }
+  const version = store._rootVersions.get(root);
+  return version === undefined ? sync : version;
 }
 
 export function getPendingStoreLanes<S, A>(
@@ -144,6 +146,7 @@ export function markTransitionStoreRoots(
     if (store._rootsBehind === 0 && store._pendingAction === null) {
       store._sync = store._head;
       store._roots.clear();
+      store._rootVersions.clear();
     }
   });
 }
@@ -201,11 +204,16 @@ function finishStoreRoots<S, A>(store: ReactStore<S, A>): void {
     ) {
       store._roots.set(root, NoLanes);
       store._rootsBehind--;
+      if (!store._isTransitionQueued) {
+        // The root committed every Transition dispatched so far.
+        store._rootVersions.set(root, store._head);
+      }
     }
   });
   if (store._rootsBehind === 0 && !store._isTransitionQueued) {
     storesWithPendingRoots.delete(store);
     store._roots.clear();
+    store._rootVersions.clear();
     if (store._sync !== store._head) {
       store._sync = store._head;
       // Readers in roots that did not render the Transition catch up to it.

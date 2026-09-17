@@ -74,6 +74,12 @@ export function createStore<S, A>(
           if (!is(syncState, sync.state)) {
             nextSync = {state: syncState};
           }
+          store._rootVersions.forEach((version, root) => {
+            const state = actualReducer(version.state, action);
+            if (!is(state, version.state)) {
+              store._rootVersions.set(root, {state});
+            }
+          });
         }
       }
       // The renderer marks the roots this Transition scheduled work on when
@@ -117,6 +123,7 @@ export function createStore<S, A>(
       ) {
         store._sync = store._head;
         store._roots.clear();
+        store._rootVersions.clear();
       }
       subscriptions.forEach(callback => callback(action));
     },
@@ -133,6 +140,7 @@ export function createStore<S, A>(
     _readers: new Set(),
     _roots: new Map(),
     _rootsBehind: 0,
+    _rootVersions: new Map(),
     _isTransitionQueued: false,
     _pendingAction: null,
   };

@@ -105,6 +105,10 @@ export type ReactStore<S, A> = {
   // root has not committed yet, or NoLanes once it has.
   _roots: Map<mixed, number>,
   _rootsBehind: number,
+  // Keyed by FiberRoot: the state a root shows after it committed Transitions
+  // another root has not. A blocking render in it starts from this, not
+  // _sync.
+  _rootVersions: Map<mixed, StoreVersion<S>>,
   // A Transition in the current event dispatched to this store, and the
   // renderer has not marked its roots yet.
   _isTransitionQueued: boolean,

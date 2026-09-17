@@ -1031,6 +1031,64 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
+  it('mounts a reader at the state its root shows after it committed a Transition another root has not', async () => {
+    const store = createStore(0);
+    function Stalls() {
+      const n = useStore(store);
+      if (n >= 10) {
+        readText('data');
+      }
+      return <Text text={'a' + n} />;
+    }
+    function StallsLater() {
+      const n = useStore(store);
+      if (n >= 20) {
+        readText('more');
+      }
+      return <Text text={'b' + n} />;
+    }
+    let showReader;
+    function NewReader() {
+      return <Text text={'new' + useStore(store)} />;
+    }
+    function App() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return (
+        <>
+          <StallsLater />
+          {show ? <NewReader /> : null}
+        </>
+      );
+    }
+
+    const rootA = ReactNoop.createRoot();
+    const rootB = ReactNoop.createRoot();
+    await act(() => {
+      rootA.render(<Stalls />);
+      rootB.render(<App />);
+    });
+    assertLog(['a0', 'b0']);
+
+    // Root B commits the first Transition. Root A waits for data.
+    await act(() => startTransition(() => store.dispatch(10)));
+    Scheduler.unstable_clearLog();
+    expect(rootA).toMatchRenderedOutput('a0');
+    expect(rootB).toMatchRenderedOutput('b10');
+
+    // Both roots wait on the second.
+    await act(() => startTransition(() => store.dispatch(20)));
+    Scheduler.unstable_clearLog();
+    expect(rootA).toMatchRenderedOutput('a0');
+    expect(rootB).toMatchRenderedOutput('b10');
+
+    // A blocking mount in root B shows what root B shows.
+    await act(() => showReader(true));
+    Scheduler.unstable_clearLog();
+    expect(rootB).toMatchRenderedOutput('b10new10');
+  });
+
+  // @gate enableStore
   it('does not expose a readerless Transition to a blocking mount', async () => {
     const store = createStore(0);
     let setPage;
