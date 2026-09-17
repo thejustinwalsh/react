@@ -26,6 +26,7 @@ import {
   isValidElement,
 } from './jsx/ReactJSXElement';
 import {createRef} from './ReactCreateRef';
+import {createStore} from './ReactStore';
 import {
   use,
   useId,
@@ -85,5 +86,7 @@ export {
   REACT_SUSPENSE_LIST_TYPE as unstable_SuspenseList,
   // enableOptimisticKey
   REACT_OPTIMISTIC_KEY as optimisticKey,
+  // enableStore
+  createStore,
   captureOwnerStack, // DEV-only
 };

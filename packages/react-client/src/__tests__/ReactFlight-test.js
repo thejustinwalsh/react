@@ -4446,6 +4446,22 @@ describe('ReactFlight', () => {
     expect(model.element.key).toBe(React.optimisticKey);
   });
 
+  // @gate enableStore
+  it('creates and dispatches to a store in a server component', async () => {
+    function Totals({rows}) {
+      const store = ReactServer.createStore(0, (total, row) => total + row);
+      for (let i = 0; i < rows.length; i++) {
+        store.dispatch(rows[i]);
+      }
+      return <span>{store.getState()}</span>;
+    }
+    const transport = ReactNoopFlightServer.render(<Totals rows={[1, 2, 3]} />);
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+    expect(ReactNoop).toMatchRenderedOutput(<span>6</span>);
+  });
+
   it('can use a JSX element exported as a client reference in multiple server components', async () => {
     const ClientReference = clientReference(React.createElement('span'));
 

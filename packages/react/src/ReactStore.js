@@ -38,7 +38,8 @@ export function createStore<S, A>(
       return state;
     },
     dispatch(action: A): void {
-      const transition = ReactSharedInternals.T;
+      // A server has no Transitions.
+      const transition = ReactSharedInternals.T ?? null;
       if (enableGestureTransition) {
         if (transition !== null && transition.gesture) {
           throw new Error(
