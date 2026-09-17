@@ -433,4 +433,21 @@ describe('useStore', () => {
     assertLog([]);
     expect(root).toMatchRenderedOutput('0');
   });
+
+  // @gate enableStore
+  it('reuses the selection it made when the action was dispatched', async () => {
+    const store = createStore({count: 0}, state => ({count: state.count + 1}));
+    const selector = jest.fn(state => state.count);
+    function App() {
+      return <Text text={'n' + useStore(store, selector)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['n0']);
+    expect(selector).toHaveBeenCalledTimes(1);
+
+    await act(() => store.dispatch());
+    assertLog(['n1']);
+    expect(selector).toHaveBeenCalledTimes(2);
+  });
 });

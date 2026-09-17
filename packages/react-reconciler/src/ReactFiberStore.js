@@ -58,6 +58,9 @@ type StoreEntry<S, A> = {
   transition: Transition | null,
 };
 
+// A reader with nothing selected eagerly.
+export const noEagerSelection: {...} = {};
+
 export type StoreReader<S, T> = {
   store: ReactStore<S, mixed>,
   root: FiberRoot,
@@ -66,7 +69,16 @@ export type StoreReader<S, T> = {
   // dispatched from one is compared with it.
   selector: (state: S, previous: T | void) => T,
   value: T,
+  // The state the reader committed, so a check that nothing moved since costs
+  // no call to the selector.
+  state: S,
+  // What the selector returned for a dispatched action, reused by the render
+  // the dispatch schedules, like the eager state of a useState update.
+  eagerState: S | typeof noEagerSelection,
+  eagerValue: T | typeof noEagerSelection,
 };
+
+
 
 // A renderer's view of a store. Until a root commits an action, it renders the
 // action like an update to state above the root, in the lane it was dispatched
@@ -240,11 +252,39 @@ function requestStoreUpdateLane(): Lane {
 
 function isSameSelection<S, T>(reader: StoreReader<S, T>, state: S): boolean {
   try {
-    return is(reader.selector(state, reader.value), reader.value);
+    const selection = reader.selector(state, reader.value);
+    reader.eagerState = state;
+    reader.eagerValue = selection;
+    return is(selection, reader.value);
   } catch (error) {
     // Render throws it.
+    reader.eagerState = noEagerSelection;
+    reader.eagerValue = noEagerSelection;
     return false;
   }
+}
+
+// What the selector returned when the action was dispatched, if the render
+// reads the same state with the same selector. Selecting again would return
+// the same thing.
+export function getEagerStoreSelection<S, T>(
+  reader: StoreReader<S, T>,
+  state: S,
+  selector: (state: S, previous: T | void) => T,
+  previous: T | void,
+): T | typeof noEagerSelection {
+  const eagerValue = reader.eagerValue;
+  if (
+    eagerValue === noEagerSelection ||
+    reader.selector !== selector ||
+    reader.eagerState !== state ||
+    previous !== reader.value
+  ) {
+    return noEagerSelection;
+  }
+  reader.eagerState = noEagerSelection;
+  reader.eagerValue = noEagerSelection;
+  return eagerValue as any;
 }
 
 function validateStoreUpdate(): void {
@@ -350,11 +390,13 @@ function dispatchToStoreReaders<S, A>(
     const fiber = reader.fiber;
     if (
       (fiber.mode & ConcurrentMode) !== NoMode &&
-      isSameSelection(reader, entry.state) &&
-      isSameSelection(reader, readStoreState(store, reader.root, NoLanes))
+      isSameSelection(reader, entry.state)
     ) {
       // Rendered with or without this action, the reader shows the same.
-      return;
+      const shownState = readStoreState(store, reader.root, NoLanes);
+      if (is(shownState, entry.state) || isSameSelection(reader, shownState)) {
+        return;
+      }
     }
     // A legacy root renders every update synchronously.
     const readerLane =
@@ -596,10 +638,11 @@ function finishStoreAction<S, A>(
 export function didStoreReaderMissAction<S, T>(
   reader: StoreReader<S, T>,
 ): boolean {
-  return !isSameSelection(
-    reader,
-    readStoreState(reader.store, reader.root, NoLanes),
-  );
+  const state = readStoreState(reader.store, reader.root, NoLanes);
+  if (is(state, reader.state)) {
+    return false;
+  }
+  return !isSameSelection(reader, state);
 }
 
 // A store's state behaves as if it lives above each root, so a render that

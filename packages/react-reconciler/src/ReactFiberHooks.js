@@ -171,6 +171,8 @@ import {
   getSkippedStoreLanes,
   subscribeToStoreReader,
   didStoreReaderMissAction,
+  getEagerStoreSelection,
+  noEagerSelection,
 } from './ReactFiberStore';
 
 import {scheduleGesture} from './ReactFiberGestureScheduler';
@@ -2018,10 +2020,8 @@ function mountStore<S, T>(
   const hook = mountWorkInProgressHook();
   const actualSelector: (state: S, previous: T | void) => T =
     selector === undefined ? (selectState as any) : selector;
-  const value = actualSelector(
-    readStoreForRender(fiber, store, root),
-    undefined,
-  );
+  const state = readStoreForRender(fiber, store, root);
+  const value = actualSelector(state, undefined);
   pushStoreReadCheck(fiber, store, root, actualSelector, undefined, value);
   hook.memoizedState = value;
   const reader: StoreReader<S, T> = {
@@ -2030,6 +2030,9 @@ function mountStore<S, T>(
     fiber,
     selector: actualSelector,
     value,
+    state,
+    eagerState: noEagerSelection,
+    eagerValue: noEagerSelection,
   };
   hook.queue = reader;
   // Subscribed while committing, so an action dispatched after the commit
@@ -2039,7 +2042,7 @@ function mountStore<S, T>(
   pushSimpleEffect(
     HookHasEffect | HookInsertion,
     createEffectInstance(),
-    commitStoreReader.bind(null, reader, actualSelector, value),
+    commitStoreReader.bind(null, reader, actualSelector, state, value),
     null,
   );
   return value;
@@ -2057,10 +2060,14 @@ function updateStore<S, T>(
     selector === undefined ? (selectState as any) : selector;
   const isSameStore = reader.store === store;
   const previous: T | void = isSameStore ? hook.memoizedState : undefined;
-  const value = actualSelector(
-    readStoreForRender(fiber, store, reader.root),
-    previous,
-  );
+  const state = readStoreForRender(fiber, store, reader.root);
+  const eagerValue = isSameStore
+    ? getEagerStoreSelection(reader, state, actualSelector, previous)
+    : noEagerSelection;
+  const value =
+    eagerValue !== noEagerSelection
+      ? (eagerValue as any)
+      : actualSelector(state, previous);
   pushStoreReadCheck(
     fiber,
     store,
@@ -2080,6 +2087,9 @@ function updateStore<S, T>(
       fiber,
       selector: actualSelector,
       value,
+      state,
+      eagerState: noEagerSelection,
+      eagerValue: noEagerSelection,
     };
     hook.queue = reader;
   }
@@ -2089,7 +2099,7 @@ function updateStore<S, T>(
     pushSimpleEffect(
       HookHasEffect | HookInsertion,
       createEffectInstance(),
-      commitStoreReader.bind(null, reader, actualSelector, value),
+      commitStoreReader.bind(null, reader, actualSelector, state, value),
       null,
     );
   }
@@ -2101,9 +2111,11 @@ function updateStore<S, T>(
 function commitStoreReader<S, T>(
   reader: StoreReader<S, T>,
   selector: (state: S, previous: T | void) => T,
+  state: S,
   value: T,
 ): void {
   reader.selector = selector;
+  reader.state = state;
   reader.value = value;
 }
 
