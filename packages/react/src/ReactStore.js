@@ -50,23 +50,22 @@ export function createStore<S, A>(
       }
       const previousState = state;
       const nextState = store._reducer(previousState, action);
-      // Renderers are told first, so one that is rendering can reject the
-      // action before the state changes. They are told of an action that
-      // changes nothing too, which can still apply to what a root shows.
-      store._listeners.forEach(listener => listener(action, nextState));
+      const update = {store, action, previousState, state: nextState};
+      // Renderers get the update before the state changes. One that is
+      // rendering rejects it before any renderer has applied it. They get an
+      // update that changes nothing too, which can still apply to what a root
+      // shows.
+      const renderers = store._renderers;
+      renderers.forEach(renderer => renderer.validateStoreUpdate());
+      renderers.forEach(renderer => renderer.receiveStoreUpdate(update));
       state = nextState;
-      if (transition !== null && store._listeners.size === 0) {
-        // A renderer that renders this Transition picks it up when the
-        // Transition's scope finishes.
-        if (transition.storeActions == null) {
-          transition.storeActions = [];
+      if (transition !== null) {
+        // A renderer that was not given the update picks it up when the
+        // Transition's scope finishes, if it renders the Transition.
+        if (transition.storeUpdates === undefined) {
+          transition.storeUpdates = [];
         }
-        transition.storeActions.push({
-          store,
-          action,
-          previousState,
-          state: nextState,
-        });
+        transition.storeUpdates.push(update);
       }
       if (!is(nextState, previousState)) {
         subscriptions.forEach(callback => callback());
@@ -80,7 +79,7 @@ export function createStore<S, A>(
     },
     _initialState: initialState,
     _reducer: reducer === undefined ? (basicStateReducer as any) : reducer,
-    _listeners: new Set(),
+    _renderers: new Set(),
   };
   return store;
 }

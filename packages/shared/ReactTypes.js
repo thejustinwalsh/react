@@ -70,12 +70,20 @@ export type ReactContext<T> = {
   displayName?: string,
 };
 
-// An action dispatched in a Transition to a store no renderer was listening to.
-export type TransitionStoreAction = {
-  store: ReactStore<any, any>,
-  action: mixed,
-  previousState: mixed,
-  state: mixed,
+// An action dispatched to a store, and the state it results in.
+export type StoreUpdate<S, A> = {
+  store: ReactStore<S, A>,
+  action: A,
+  previousState: S,
+  state: S,
+};
+
+// A renderer with readers of a store.
+export type StoreRenderer = {
+  // Throws if the renderer cannot accept an update now. Every renderer is asked
+  // before any renderer receives the update.
+  validateStoreUpdate(): void,
+  receiveStoreUpdate(update: StoreUpdate<any, any>): void,
 };
 
 export type ReactStore<S, A> = {
@@ -86,9 +94,9 @@ export type ReactStore<S, A> = {
   // The state a server rendered from, when the store is created from it.
   _initialState: S,
   _reducer: (S, A) => S,
-  // Renderers with readers of the store, told of each action and the state it
-  // results in before the store's state changes.
-  _listeners: Set<(action: A, state: S) => void>,
+  // Renderers with readers of the store, given each update before the store's
+  // state changes.
+  _renderers: Set<StoreRenderer>,
 };
 
 export type ReactPortal = {

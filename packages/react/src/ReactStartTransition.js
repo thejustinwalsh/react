@@ -12,7 +12,7 @@ import type {
   StartTransitionOptions,
   GestureProvider,
   GestureOptions,
-  TransitionStoreAction,
+  StoreUpdate,
 } from 'shared/ReactTypes';
 import type {TransitionTypes} from './ReactTransitionType';
 
@@ -22,6 +22,7 @@ import {
   enableTransitionTracing,
   enableViewTransition,
   enableGestureTransition,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 
 import reportGlobalError from 'shared/reportGlobalError';
@@ -33,7 +34,7 @@ export type Transition = {
   gesture: null | GestureProvider, // enableGestureTransition
   name: null | string, // enableTransitionTracing only
   startTime: number, // enableTransitionTracing only
-  storeActions?: Array<TransitionStoreAction>, // enableStore
+  storeUpdates?: Array<StoreUpdate<any, any>>, // enableStore
   _updatedFibers: Set<Fiber>, // DEV-only
   ...
 };
@@ -94,6 +95,14 @@ export function startTransition(
       returnValue.then(noop, reportGlobalError);
     }
   } catch (error) {
+    if (enableStore && currentTransition.storeUpdates !== undefined) {
+      // Store updates dispatched before the scope threw still commit, like
+      // state updates do, so the renderers finish the Transition.
+      const onStartTransitionFinish = ReactSharedInternals.S;
+      if (onStartTransitionFinish !== null) {
+        onStartTransitionFinish(currentTransition, undefined);
+      }
+    }
     reportGlobalError(error);
   } finally {
     warnAboutTransitionSubscriptions(prevTransition, currentTransition);

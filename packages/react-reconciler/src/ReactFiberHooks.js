@@ -44,6 +44,7 @@ import {
   enableNoCloningMemoCache,
   enableViewTransition,
   enableGestureTransition,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import {
   REACT_CONTEXT_TYPE,
@@ -1941,8 +1942,8 @@ function validateStore(store: mixed): void {
     store.$$typeof !== REACT_STORE_TYPE
   ) {
     throw new Error(
-      'Expected the first argument to useStore to be a store created by ' +
-        'createStore.',
+      'Expected the first argument to `useStore` to be a store created by ' +
+        '`createStore`.',
     );
   }
 }
@@ -2416,6 +2417,14 @@ function runActionStateAction<S, P>(
       }
       handleActionReturnValue(actionQueue, node, returnValue);
     } catch (error) {
+      if (enableStore && currentTransition.storeUpdates !== undefined) {
+        // Store updates dispatched before the action threw still commit, like
+        // state updates do, so the renderers finish the Transition.
+        const onStartTransitionFinish = ReactSharedInternals.S;
+        if (onStartTransitionFinish !== null) {
+          onStartTransitionFinish(currentTransition, undefined);
+        }
+      }
       onActionError(actionQueue, node, error);
     } finally {
       if (prevTransition !== null && currentTransition.types !== null) {
@@ -3404,6 +3413,14 @@ function startTransition<S>(
       );
     }
   } catch (error) {
+    if (enableStore && currentTransition.storeUpdates !== undefined) {
+      // Store updates dispatched before the scope threw still commit, like
+      // state updates do, so the renderers finish the Transition.
+      const onStartTransitionFinish = ReactSharedInternals.S;
+      if (onStartTransitionFinish !== null) {
+        onStartTransitionFinish(currentTransition, undefined);
+      }
+    }
     // This is a trick to get the `useTransition` hook to rethrow the error.
     // When it unwraps the thenable with the `use` algorithm, the error
     // will be thrown.

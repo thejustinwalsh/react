@@ -693,4 +693,132 @@ describe('useStore in a Transition', () => {
     expect(root).toMatchRenderedOutput('5');
     expect(store.getState()).toBe(5);
   });
+
+  // @gate enableStore
+  it('does not expose a readerless Transition to a blocking mount after its scope throws', async () => {
+    const store = createStore(0);
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    let showReader;
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    function Other() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <Reader /> : <Text text="n-" />;
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <>
+          <Suspense fallback={<Text text="Loading" />}>
+            <Page />
+          </Suspense>
+          <Other />
+        </>,
+      ),
+    );
+    assertLog(['home', 'n-']);
+
+    // The updates dispatched before the scope throws still commit together.
+    await act(() =>
+      startTransition(() => {
+        store.dispatch(10);
+        setPage('about');
+        throw new Error('Oops');
+      }),
+    );
+    assertLog(['reportError: Oops', 'Loading']);
+
+    await act(() => showReader(true));
+    assertLog(['n0', 'Loading', 'n10']);
+    expect(root).toMatchRenderedOutput('homen0');
+
+    await act(() => resolveText('about'));
+    assertLog(['about', 'n10']);
+    expect(root).toMatchRenderedOutput('aboutn10');
+  });
+
+  // @gate enableStore
+  it('does not expose a readerless Transition to a blocking mount after a useTransition scope throws', async () => {
+    const store = createStore(0);
+    class ErrorBoundary extends React.Component {
+      state = {error: null};
+      static getDerivedStateFromError(error) {
+        return {error};
+      }
+      render() {
+        if (this.state.error !== null) {
+          return <Text text={this.state.error.message} />;
+        }
+        return this.props.children;
+      }
+    }
+    let startPageTransition;
+    function Starter() {
+      const [, _startTransition] = React.useTransition();
+      startPageTransition = _startTransition;
+      return <Text text="starter" />;
+    }
+    let setPage;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    let showReader;
+    function Reader() {
+      return <Text text={'n' + useStore(store)} />;
+    }
+    function Other() {
+      const [show, setShow] = useState(false);
+      showReader = setShow;
+      return show ? <Reader /> : <Text text="n-" />;
+    }
+
+    const rootA = ReactNoop.createRoot();
+    const rootB = ReactNoop.createRoot();
+    await act(() => {
+      rootA.render(
+        <ErrorBoundary>
+          <Starter />
+        </ErrorBoundary>,
+      );
+      rootB.render(
+        <>
+          <Suspense fallback={<Text text="Loading" />}>
+            <Page />
+          </Suspense>
+          <Other />
+        </>,
+      );
+    });
+    assertLog(['starter', 'home', 'n-']);
+
+    // Root A's scope throws after updating root B, which waits on data.
+    await act(() =>
+      startPageTransition(() => {
+        store.dispatch(10);
+        setPage('about');
+        throw new Error('Oops');
+      }),
+    );
+    assertLog(['starter', 'Loading', 'Oops', 'Oops']);
+    expect(rootA).toMatchRenderedOutput('Oops');
+    expect(rootB).toMatchRenderedOutput('homen-');
+
+    await act(() => showReader(true));
+    assertLog(['n0', 'Loading', 'n10']);
+    expect(rootB).toMatchRenderedOutput('homen0');
+
+    await act(() => resolveText('about'));
+    assertLog(['about', 'n10']);
+    expect(rootB).toMatchRenderedOutput('aboutn10');
+  });
 });

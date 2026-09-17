@@ -79,8 +79,8 @@ export const enableFragmentRefsTextNodes: boolean = true;
 export const enableInternalInstanceMap: boolean = false;
 
 export const enableOptimisticKey: boolean = false;
-export const enableStore: boolean = false;
-export const enableStrictEntanglement: boolean = false;
+export const enableStore: boolean = __EXPERIMENTAL__;
+export const enableStrictEntanglement: boolean = __EXPERIMENTAL__;
 
 // Profiling Only
 export const enableProfilerTimer: boolean = __PROFILE__;

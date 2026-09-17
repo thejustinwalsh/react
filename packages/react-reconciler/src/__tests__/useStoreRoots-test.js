@@ -306,4 +306,40 @@ describe('useStore in multiple roots', () => {
     assertLog(['n1']);
     expect(rootB).toMatchRenderedOutput('n1');
   });
+
+  // @gate enableStore
+  it('shows an async Action in a root that mounted during it once it finishes', async () => {
+    const store = createStore(0);
+    function Reader({name}) {
+      return <Text text={name + useStore(store)} />;
+    }
+
+    const rootA = ReactNoop.createRoot();
+    await act(() => rootA.render(<Reader name="a" />));
+    assertLog(['a0']);
+
+    let finishAction;
+    await act(() =>
+      startTransition(async () => {
+        store.dispatch(1);
+        await new Promise(resolve => (finishAction = resolve));
+      }),
+    );
+    assertLog([]);
+    expect(rootA).toMatchRenderedOutput('a0');
+
+    // Like an update in the Action, the action is not shown before the Action
+    // finishes.
+    const rootB = ReactNoop.createRoot();
+    await act(() => rootB.render(<Reader name="b" />));
+    assertLog(['b0']);
+    expect(rootB).toMatchRenderedOutput('b0');
+
+    // Root B had no work pending for the Action, so it shows the action as
+    // soon as the Action finishes, without waiting for root A.
+    await act(() => finishAction());
+    assertLog(['b1', 'a1']);
+    expect(rootA).toMatchRenderedOutput('a1');
+    expect(rootB).toMatchRenderedOutput('b1');
+  });
 });

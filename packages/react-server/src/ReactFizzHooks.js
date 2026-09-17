@@ -647,8 +647,8 @@ function useStore<S, T>(
     maybeStore.$$typeof !== REACT_STORE_TYPE
   ) {
     throw new Error(
-      'Expected the first argument to useStore to be a store created by ' +
-        'createStore.',
+      'Expected the first argument to `useStore` to be a store created by ' +
+        '`createStore`.',
     );
   }
   const state = store.getState();
