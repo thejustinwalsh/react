@@ -593,5 +593,8 @@
   "605": "Recoverable Exception: This is not a real error! It's an implementation detail of `use` to interrupt the current render so a downstream renderer can recover it. You must either rethrow it immediately, or move the `use` call outside of the `try/catch` block. Capturing without rethrowing will lead to unexpected behavior.",
   "606": "Expected a suspended recoverable. This is a bug in React. Please file an issue.",
   "607": "This library called use() to suspend in a previous render but did not call use() when it finished. This indicates an incorrect use of use(). Learn more: https://react.dev/warnings/conditional-use-of-use",
-  "608": "A client reference was blocked on a row that has not been received yet. This is a bug in React."
+  "608": "A client reference was blocked on a row that has not been received yet. This is a bug in React.",
+  "609": "Cannot dispatch to a store while rendering. Dispatch from an event handler or an effect instead.",
+  "610": "Cannot dispatch to a store inside a startGestureTransition. Gestures can only update the useOptimistic() hook.",
+  "611": "Expected the first argument to useStore to be a store created by createStore."
 }

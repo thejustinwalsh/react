@@ -12,7 +12,6 @@
 
 let React;
 let ReactNoop;
-let Scheduler;
 let act;
 let Random;
 
@@ -23,7 +22,6 @@ describe('ReactStoreFuzz', () => {
     jest.resetModules();
     React = require('react');
     ReactNoop = require('react-noop-renderer');
-    Scheduler = require('scheduler');
     act = require('internal-test-utils').act;
   }
 
@@ -253,7 +251,6 @@ describe('ReactStoreFuzz', () => {
             }
           }
         });
-        Scheduler.unstable_clearLog();
       }
       return commits;
     }
@@ -784,7 +781,6 @@ describe('ReactStoreFuzz', () => {
     });
   });
 
-  // @gate enableStore && enableProfilerTimer
   // @gate enableStore && enableProfilerTimer
   it(`generative tests (random seed: ${SEED})`, async () => {
     const {generateSteps, testRules} = createFuzzer();

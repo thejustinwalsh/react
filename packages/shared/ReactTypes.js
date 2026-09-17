@@ -70,51 +70,17 @@ export type ReactContext<T> = {
   displayName?: string,
 };
 
-export type StoreVersion<S> = {
-  state: S,
-};
-
-// What a reader queues: an action to reduce, or a version to show.
-export type StoreUpdate<S, A> = {
-  action: A | void,
-  version: StoreVersion<S> | null,
-  // What the store reduced the action to, from its latest state and from the
-  // state a root shows. A reader reducing it from either reuses the result.
-  head: StoreVersion<S> | null,
-  nextHead: StoreVersion<S> | null,
-  sync: StoreVersion<S> | null,
-  nextSync: StoreVersion<S> | null,
-};
-
 export type ReactStore<S, A> = {
   $$typeof: symbol | number,
   getState(): S,
   dispatch(action: A): void,
-  subscribe(callback: (action: A) => void): () => void,
-  _initial: StoreVersion<S>,
-  // Every action, in the order dispatched.
-  _head: StoreVersion<S>,
-  // What a root that has not shown a pending Transition shows. The same object
-  // as _head when no Transition is pending.
-  _sync: StoreVersion<S>,
+  subscribe(callback: () => void): () => void,
+  // The state a server rendered from, when the store is created from it.
+  _initialState: S,
   _reducer: (S, A) => S,
-  // Notified synchronously with each action, or with null to catch up with the
-  // state their root shows at the given lane.
-  _readers: Set<(update: StoreUpdate<S, A> | null, lane?: number) => void>,
-  // Keyed by FiberRoot while a Transition is pending: the Transition lanes the
-  // root has not committed yet, or NoLanes once it has.
-  _roots: Map<mixed, number>,
-  _rootsBehind: number,
-  // Keyed by FiberRoot: the state a root shows after it committed Transitions
-  // another root has not. A blocking render in it starts from this, not
-  // _sync.
-  _rootVersions: Map<mixed, StoreVersion<S>>,
-  // A Transition in the current event dispatched to this store, and the
-  // renderer has not marked its roots yet.
-  _isTransitionQueued: boolean,
-  // An async Action that dispatched to this store and has not finished. Its
-  // updates stay hidden until it does, as updates to useState do.
-  _pendingAction: null | Thenable<void>,
+  // Renderers with readers of the store, told of each action and the state it
+  // results in before the store's state changes.
+  _listeners: Set<(action: A, state: S) => void>,
 };
 
 export type ReactPortal = {

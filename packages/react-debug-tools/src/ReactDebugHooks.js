@@ -37,6 +37,7 @@ import {
   REACT_MEMO_CACHE_SENTINEL,
   REACT_CONTEXT_TYPE,
   REACT_RECOVERABLE_TYPE,
+  REACT_STORE_TYPE,
 } from 'shared/ReactSymbols';
 import hasOwnProperty from 'shared/hasOwnProperty';
 
@@ -96,6 +97,10 @@ function getPrimitiveStackCache(): Map<string, Array<any>> {
         () => null,
         () => null,
       );
+      Dispatcher.useStore<null, null>({
+        $$typeof: REACT_STORE_TYPE,
+        getState: () => null,
+      } as any);
       Dispatcher.useDeferredValue(null);
       Dispatcher.useMemo(() => null);
       Dispatcher.useOptimistic(null, (s: mixed, a: mixed) => s);
@@ -504,8 +509,7 @@ function useStore<S, T>(
   // useStore() composes multiple hooks internally.
   // Advance the current hook index the same number of times
   // so that subsequent hooks have the right memoized state.
-  nextHook(); // Store
-  const hook = nextHook(); // Value
+  const hook = nextHook(); // Store
   nextHook(); // Effect
   let value;
   if (hook !== null) {

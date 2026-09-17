@@ -17,7 +17,6 @@ import {
 } from 'shared/ReactSymbols';
 import {createThenableState, trackUsedThenable} from './ReactFlightThenable';
 import {isClientReference} from './ReactFlightServerConfig';
-import {enableStore} from 'shared/ReactFeatureFlags';
 
 let currentRequest = null;
 let thenableIndexCounter = 0;
@@ -86,6 +85,7 @@ export const HooksDispatcher: Dispatcher = {
   useDeferredValue: unsupportedHook as any,
   useTransition: unsupportedHook as any,
   useSyncExternalStore: unsupportedHook as any,
+  useStore: unsupportedHook as any,
   useId,
   useHostTransitionStatus: unsupportedHook as any,
   useFormState: unsupportedHook as any,
@@ -103,9 +103,6 @@ export const HooksDispatcher: Dispatcher = {
   },
   useEffectEvent: unsupportedHook as any,
 };
-if (enableStore) {
-  HooksDispatcher.useStore = unsupportedHook as any;
-}
 
 function unsupportedHook(): void {
   throw new Error('This Hook is not supported in Server Components.');

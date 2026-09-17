@@ -438,8 +438,7 @@ export type Dispatcher = {
     getSnapshot: () => T,
     getServerSnapshot?: () => T,
   ): T,
-  // TODO: Non-nullable once `enableStore` is on everywhere.
-  useStore?: <S, T>(
+  useStore: <S, T>(
     store: ReactStore<S, mixed>,
     selector?: (state: S, previous: T | void) => T,
   ) => S | T,

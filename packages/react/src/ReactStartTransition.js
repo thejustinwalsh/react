@@ -12,9 +12,9 @@ import type {
   StartTransitionOptions,
   GestureProvider,
   GestureOptions,
-  ReactStore,
 } from 'shared/ReactTypes';
 import type {TransitionTypes} from './ReactTransitionType';
+import type {TransitionStoreAction} from 'react-reconciler/src/ReactFiberStore';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 
@@ -22,7 +22,6 @@ import {
   enableTransitionTracing,
   enableViewTransition,
   enableGestureTransition,
-  enableStore,
 } from 'shared/ReactFeatureFlags';
 
 import reportGlobalError from 'shared/reportGlobalError';
@@ -34,7 +33,7 @@ export type Transition = {
   gesture: null | GestureProvider, // enableGestureTransition
   name: null | string, // enableTransitionTracing only
   startTime: number, // enableTransitionTracing only
-  stores: null | Set<ReactStore<any, any>>, // enableStore
+  storeActions?: Array<TransitionStoreAction>, // enableStore
   _updatedFibers: Set<Fiber>, // DEV-only
   ...
 };
@@ -51,9 +50,6 @@ export function startTransition(
 ): void {
   const prevTransition = ReactSharedInternals.T;
   const currentTransition: Transition = {} as any;
-  if (enableStore) {
-    currentTransition.stores = null;
-  }
   if (enableViewTransition) {
     currentTransition.types =
       prevTransition !== null
@@ -98,13 +94,6 @@ export function startTransition(
       returnValue.then(noop, reportGlobalError);
     }
   } catch (error) {
-    if (enableStore && currentTransition.stores !== null) {
-      // Stores dispatched to before the error still render with the Transition.
-      const onStartTransitionFinish = ReactSharedInternals.S;
-      if (onStartTransitionFinish !== null) {
-        onStartTransitionFinish(currentTransition, undefined);
-      }
-    }
     reportGlobalError(error);
   } finally {
     warnAboutTransitionSubscriptions(prevTransition, currentTransition);

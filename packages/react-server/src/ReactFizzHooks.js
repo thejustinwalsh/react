@@ -40,11 +40,11 @@ import {
 } from './ReactFizzConfig';
 import {createFastHash} from './ReactServerStreamConfig';
 
-import {enableStore} from 'shared/ReactFeatureFlags';
 import is from 'shared/objectIs';
 import hasOwnProperty from 'shared/hasOwnProperty';
 import {
   REACT_CONTEXT_TYPE,
+  REACT_STORE_TYPE,
   REACT_RECOVERABLE_TYPE,
   REACT_MEMO_CACHE_SENTINEL,
 } from 'shared/ReactSymbols';
@@ -640,6 +640,17 @@ function useStore<S, T>(
   selector?: (state: S, previous: T | void) => T,
 ): S | T {
   resolveCurrentlyRenderingComponent();
+  const maybeStore: mixed = store;
+  if (
+    maybeStore === null ||
+    typeof maybeStore !== 'object' ||
+    maybeStore.$$typeof !== REACT_STORE_TYPE
+  ) {
+    throw new Error(
+      'Expected the first argument to useStore to be a store created by ' +
+        'createStore.',
+    );
+  }
   const state = store.getState();
   return selector === undefined ? state : selector(state, undefined);
 }
@@ -915,6 +926,7 @@ export const HooksDispatcher: Dispatcher = supportsClientAPIs
       useId,
       // Subscriptions are not setup in a server environment.
       useSyncExternalStore,
+      useStore,
       useOptimistic,
       useActionState,
       useFormState: useActionState,
@@ -940,6 +952,7 @@ export const HooksDispatcher: Dispatcher = supportsClientAPIs
       useDeferredValue: clientHookNotSupported,
       useTransition: clientHookNotSupported,
       useSyncExternalStore: clientHookNotSupported,
+      useStore: clientHookNotSupported,
       useId,
       useHostTransitionStatus,
       useFormState: useActionState,
@@ -949,13 +962,6 @@ export const HooksDispatcher: Dispatcher = supportsClientAPIs
       useCacheRefresh,
       useEffectEvent,
     };
-
-if (enableStore) {
-  // $FlowFixMe[constant-condition]
-  HooksDispatcher.useStore = supportsClientAPIs
-    ? useStore
-    : clientHookNotSupported;
-}
 
 export let currentResumableState: null | ResumableState = null as any;
 export function setCurrentResumableState(

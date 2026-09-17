@@ -7,220 +7,534 @@
  * @flow
  */
 
-import type {ReactStore, StoreVersion} from 'shared/ReactTypes';
-import type {FiberRoot} from './ReactInternalTypes';
+import type {ReactStore} from 'shared/ReactTypes';
+import type {Fiber, FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
-import {
-  peekEntangledActionLane,
-  peekEntangledActionThenable,
-} from './ReactFiberAsyncAction';
 
+import is from 'shared/objectIs';
 import {
   NoLane,
   NoLanes,
   SyncLane,
   includesSomeLane,
-  intersectLanes,
+  isTransitionLane,
   markRootEntangled,
   mergeLanes,
 } from './ReactFiberLane';
+import {
+  peekEntangledActionLane,
+  peekEntangledActionThenable,
+} from './ReactFiberAsyncAction';
+import {eventPriorityToLane} from './ReactEventPriorities';
+import {resolveUpdatePriority} from './ReactFiberConfig';
+import {requestCurrentTransition} from './ReactFiberTransition';
+import {
+  firstScheduledRoot,
+  requestTransitionLane,
+} from './ReactFiberRootScheduler';
+import {enqueueConcurrentRenderForLane} from './ReactFiberConcurrentUpdates';
+import {
+  isInvalidExecutionContextForEventFunction,
+  scheduleUpdateOnFiber,
+} from './ReactFiberWorkLoop';
+import {startUpdateTimerByLane} from './ReactProfilerTimer';
+import {ConcurrentMode, NoMode, StrictLegacyMode} from './ReactTypeOfMode';
 
-// Stores with a root that has not committed a Transition toward their latest
-// state. Held only until those roots commit.
-const storesWithPendingRoots: Set<ReactStore<any, any>> = new Set();
+// An action that not every root with a reader has committed.
+type StoreEntry<S, A> = {
+  action: A,
+  lane: Lane,
+  // The store's state after this action.
+  state: S,
+  // Roots that had work pending in the action's lane when it was dispatched,
+  // and wait to show it until they commit it.
+  pendingRoots: Set<FiberRoot>,
+  committedRoots: Set<FiberRoot>,
+};
 
-// While a Transition is pending, a root rendering it reads the latest state,
-// a root that committed it reads the latest state, and any other root reads
-// the state from before it.
-export function getStoreVersion<S, A>(
+export type StoreReader<S, T> = {
+  store: ReactStore<S, mixed>,
+  root: FiberRoot,
+  fiber: Fiber,
+  // What the reader committed. Published before layout effects, so an action
+  // dispatched from one is compared with it.
+  selector: (state: S, previous: T | void) => T,
+  value: T,
+};
+
+// A renderer's view of a store. Until a root commits an action, it renders the
+// action like an update to state above the root, in the lane it was dispatched
+// in.
+type StoreInternals<S, A> = {
+  store: ReactStore<S, A>,
+  // The state every root with a reader has committed.
+  baseState: S,
+  entries: Array<StoreEntry<S, A>>,
+  readers: Set<StoreReader<S, any>>,
+  // The number of readers in each root.
+  roots: Map<FiberRoot, number>,
+  onDispatch: (action: A, state: S) => void,
+  strictReaders: number, // DEV-only
+};
+
+const storeInternals: WeakMap<
+  ReactStore<any, any>,
+  StoreInternals<any, any>,
+> = new WeakMap();
+
+// Stores dispatched to in a Transition scope that has not finished.
+let storesDispatchedInTransition: Set<StoreInternals<any, any>> | null = null;
+
+// The stores each root has a reader of.
+const rootStores: Map<FiberRoot, Set<StoreInternals<any, any>>> = new Map();
+
+function getStoreInternals<S, A>(
+  store: ReactStore<S, A>,
+): StoreInternals<S, A> {
+  const existingInternals = storeInternals.get(store);
+  if (existingInternals !== undefined) {
+    return existingInternals;
+  }
+  const internals: StoreInternals<S, A> = {
+    store,
+    baseState: store.getState(),
+    entries: [],
+    readers: new Set(),
+    roots: new Map(),
+    onDispatch: (action: A, state: S) =>
+      dispatchToStoreReaders(internals, action, state),
+    strictReaders: 0,
+  };
+  storeInternals.set(store, internals);
+  return internals;
+}
+
+function isStoreEntryVisible<S, A>(
+  entry: StoreEntry<S, A>,
+  root: FiberRoot,
+  lanes: Lanes,
+): boolean {
+  if (entry.committedRoots.has(root) || includesSomeLane(lanes, entry.lane)) {
+    return true;
+  }
+  // A root that had no work pending for an action has nothing to render with
+  // it, so it shows it, unless the action is part of an unfinished async
+  // Action.
+  return (
+    !entry.pendingRoots.has(root) && entry.lane !== peekEntangledActionLane()
+  );
+}
+
+// The state of a store a root renders at these lanes.
+export function readStoreState<S, A>(
   store: ReactStore<S, A>,
   root: FiberRoot,
   lanes: Lanes,
-): StoreVersion<S> {
-  const head = store._head;
-  const sync = store._sync;
-  if (sync === head) {
-    return head;
+): S {
+  const internals = storeInternals.get(store);
+  if (internals === undefined || internals.entries.length === 0) {
+    return store.getState();
   }
-  const pendingLanes = store._roots.get(root);
-  if (pendingLanes === undefined) {
-    return sync;
+  const entries = internals.entries;
+  let state = internals.baseState;
+  let isRebasing = false;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!isStoreEntryVisible(entry, root, lanes)) {
+      isRebasing = true;
+    } else if (isRebasing) {
+      state = store._reducer(state, entry.action);
+    } else {
+      state = entry.state;
+    }
   }
-  if (pendingLanes === NoLanes || includesSomeLane(lanes, pendingLanes)) {
-    return head;
-  }
-  const version = store._rootVersions.get(root);
-  return version === undefined ? sync : version;
+  return state;
 }
 
-export function getPendingStoreLanes<S, A>(
+// The lanes of actions a render at these lanes leaves out, which the root still
+// has to render.
+export function getSkippedStoreLanes<S, A>(
   store: ReactStore<S, A>,
   root: FiberRoot,
+  lanes: Lanes,
 ): Lanes {
-  const pendingLanes = store._roots.get(root);
-  return pendingLanes === undefined
-    ? NoLanes
-    : intersectLanes(root.pendingLanes, pendingLanes);
+  const internals = storeInternals.get(store);
+  if (internals === undefined) {
+    return NoLanes;
+  }
+  let skippedLanes = NoLanes;
+  const entries = internals.entries;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!isStoreEntryVisible(entry, root, lanes)) {
+      skippedLanes = mergeLanes(skippedLanes, entry.lane);
+    }
+  }
+  return skippedLanes;
 }
 
-export function markStoreRootBehind<S, A>(
-  store: ReactStore<S, A>,
-  root: FiberRoot,
-  lane: Lane,
+function requestStoreUpdateLane(): Lane {
+  const transition = requestCurrentTransition();
+  if (transition !== null) {
+    return requestTransitionLane(transition);
+  }
+  return eventPriorityToLane(resolveUpdatePriority());
+}
+
+function isSameSelection<S, T>(reader: StoreReader<S, T>, state: S): boolean {
+  try {
+    return is(reader.selector(state, reader.value), reader.value);
+  } catch (error) {
+    // Render throws it.
+    return false;
+  }
+}
+
+function dispatchToStoreReaders<S, A>(
+  internals: StoreInternals<S, A>,
+  action: A,
+  state: S,
 ): void {
-  const pendingLanes = store._roots.get(root);
-  if (pendingLanes === undefined || pendingLanes === NoLanes) {
-    store._roots.set(root, lane);
-    store._rootsBehind++;
-    storesWithPendingRoots.add(store);
+  if (isInvalidExecutionContextForEventFunction()) {
+    throw new Error(
+      'Cannot dispatch to a store while rendering. Dispatch from an event ' +
+        'handler or an effect instead.',
+    );
+  }
+  const store = internals.store;
+  const entries = internals.entries;
+  if (__DEV__ && internals.strictReaders > 0) {
+    // Like StrictMode does for useReducer, surface an impure reducer by
+    // calling it twice.
+    store._reducer(
+      entries.length > 0
+        ? entries[entries.length - 1].state
+        : internals.baseState,
+      action,
+    );
+  }
+  const lane = requestStoreUpdateLane();
+  const entry: StoreEntry<S, A> = {
+    action,
+    lane,
+    state,
+    pendingRoots: new Set(),
+    committedRoots: new Set(),
+  };
+  entries.push(entry);
+
+  if (isTransitionLane(lane)) {
+    internals.roots.forEach((count, root) => {
+      const pendingLanes = getPendingTransitionLanes(internals, root);
+      if (pendingLanes !== NoLanes) {
+        // A store is one queue, so its pending Transitions in a root render
+        // together, like updates to one hook, even when no reader renders
+        // this one.
+        const hostRoot = root.current;
+        const scheduledRoot = enqueueConcurrentRenderForLane(hostRoot, lane);
+        if (scheduledRoot !== null) {
+          scheduleUpdateOnFiber(scheduledRoot, hostRoot, lane);
+        }
+        markRootEntangled(root, mergeLanes(pendingLanes, lane));
+      }
+    });
+  }
+
+  internals.readers.forEach(reader => {
+    const fiber = reader.fiber;
+    if (
+      (fiber.mode & ConcurrentMode) !== NoMode &&
+      isSameSelection(reader, entry.state) &&
+      isSameSelection(reader, readStoreState(store, reader.root, NoLanes))
+    ) {
+      // Rendered with or without this action, the reader shows the same.
+      return;
+    }
+    // A legacy root renders every update synchronously.
+    const readerLane =
+      (fiber.mode & ConcurrentMode) === NoMode ? SyncLane : lane;
+    const root = enqueueConcurrentRenderForLane(fiber, readerLane);
+    if (root !== null) {
+      startUpdateTimerByLane(readerLane, 'store.dispatch()', fiber);
+      scheduleUpdateOnFiber(root, fiber, readerLane);
+    }
+  });
+
+  markStoreEntryPendingRoots(internals, entry);
+
+  if (isTransitionLane(lane)) {
+    // Whether the action is part of an async Action, and which roots the
+    // Transition schedules work on, is known once its scope finishes.
+    if (storesDispatchedInTransition === null) {
+      storesDispatchedInTransition = new Set();
+    }
+    storesDispatchedInTransition.add(internals);
   } else {
-    store._roots.set(root, mergeLanes(pendingLanes, lane));
+    compactStoreEntries(internals);
   }
 }
 
-// Stores dispatched to inside a Transition during the current event. Roots are
-// marked when the event's work is scheduled, after every Transition scope in
-// the event has finished, including nested and throwing ones.
-let pendingTransitionStores: Set<ReactStore<any, any>> | null = null;
-
-export function queueTransitionStores(stores: Set<ReactStore<any, any>>): void {
-  if (pendingTransitionStores === null) {
-    pendingTransitionStores = new Set();
-  }
-  const pending = pendingTransitionStores;
-  stores.forEach(store => {
-    pending.add(store);
+function markStoreEntryPendingRoots<S, A>(
+  internals: StoreInternals<S, A>,
+  entry: StoreEntry<S, A>,
+): void {
+  internals.roots.forEach((readers, root) => {
+    if (includesSomeLane(root.pendingLanes, entry.lane)) {
+      entry.pendingRoots.add(root);
+    }
   });
 }
 
-// A root that scheduled work at the event's Transition lane renders the stores'
-// latest state with that work, even if nothing in it read the stores yet.
-export function markTransitionStoreRoots(
-  firstRoot: FiberRoot | null,
-  transitionLane: Lane,
+// The Transition lanes of actions a root has not committed and has work
+// pending for, other than the last one.
+function getPendingTransitionLanes<S, A>(
+  internals: StoreInternals<S, A>,
+  root: FiberRoot,
+): Lanes {
+  let lanes = NoLanes;
+  const entries = internals.entries;
+  for (let i = 0; i < entries.length - 1; i++) {
+    const entry = entries[i];
+    if (
+      entry.pendingRoots.has(root) &&
+      !entry.committedRoots.has(root) &&
+      isTransitionLane(entry.lane) &&
+      includesSomeLane(root.pendingLanes, entry.lane)
+    ) {
+      lanes = mergeLanes(lanes, entry.lane);
+    }
+  }
+  return lanes;
+}
+
+// Forget the actions every root shows, and the roots that only waited on them.
+function compactStoreEntries<S, A>(internals: StoreInternals<S, A>): void {
+  const entries = internals.entries;
+  let count = 0;
+  while (count < entries.length) {
+    const entry = entries[count];
+    let isShownEverywhere = true;
+    internals.roots.forEach((readers, root) => {
+      if (!isStoreEntryVisible(entry, root, NoLanes)) {
+        isShownEverywhere = false;
+      }
+    });
+    if (!isShownEverywhere) {
+      break;
+    }
+    count++;
+  }
+  if (count > 0) {
+    internals.baseState = entries[count - 1].state;
+    entries.splice(0, count);
+  }
+  internals.roots.forEach((readers, root) => {
+    if (readers === 0 && !hasPendingStoreEntries(internals, root)) {
+      removeStoreRoot(internals, root);
+    }
+  });
+  if (internals.readers.size === 0 && entries.length === 0) {
+    internals.store._listeners.delete(internals.onDispatch);
+  }
+}
+
+function hasPendingStoreEntries<S, A>(
+  internals: StoreInternals<S, A>,
+  root: FiberRoot,
+): boolean {
+  const entries = internals.entries;
+  for (let i = 0; i < entries.length; i++) {
+    if (!isStoreEntryVisible(entries[i], root, NoLanes)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function listenToStore<S, A>(internals: StoreInternals<S, A>): void {
+  const store = internals.store;
+  if (!store._listeners.has(internals.onDispatch)) {
+    // Not listening, so the log is empty.
+    internals.baseState = store.getState();
+    store._listeners.add(internals.onDispatch);
+  }
+}
+
+function addStoreRoot<S, A>(
+  internals: StoreInternals<S, A>,
+  root: FiberRoot,
+  readers: number,
 ): void {
-  const stores = pendingTransitionStores;
+  internals.roots.set(root, (internals.roots.get(root) || 0) + readers);
+  let stores = rootStores.get(root);
+  if (stores === undefined) {
+    stores = new Set();
+    rootStores.set(root, stores);
+  }
+  stores.add(internals);
+}
+
+function removeStoreRoot<S, A>(
+  internals: StoreInternals<S, A>,
+  root: FiberRoot,
+): void {
+  internals.roots.delete(root);
+  const stores = rootStores.get(root);
+  if (stores !== undefined) {
+    stores.delete(internals);
+    if (stores.size === 0) {
+      rootStores.delete(root);
+    }
+  }
+}
+
+export function subscribeToStoreReader<S, T>(
+  reader: StoreReader<S, T>,
+): () => void {
+  const root = reader.root;
+  const internals = getStoreInternals(reader.store);
+  listenToStore(internals);
+  internals.readers.add(reader);
+  addStoreRoot(internals, root, 1);
+  const isStrict = __DEV__ && (reader.fiber.mode & StrictLegacyMode) !== NoMode;
+  if (isStrict) {
+    internals.strictReaders++;
+  }
+  return () => {
+    if (isStrict) {
+      internals.strictReaders--;
+    }
+    internals.readers.delete(reader);
+    internals.roots.set(root, (internals.roots.get(root) || 0) - 1);
+    compactStoreEntries(internals);
+  };
+}
+
+export type TransitionStoreAction = {
+  store: ReactStore<any, any>,
+  action: mixed,
+  previousState: mixed,
+  state: mixed,
+};
+
+// Called when a Transition's scope finishes. Actions dispatched in it to a
+// store no renderer was listening to are shown by a root that renders the
+// Transition, even if it has no readers of the store yet.
+export function finishStoreTransition(
+  storeActions: Array<TransitionStoreAction> | void,
+  lane: Lane,
+): void {
+  if (storeActions != null && lane !== NoLane) {
+    for (let i = 0; i < storeActions.length; i++) {
+      const {store, action, previousState, state} = storeActions[i];
+      const internals = getStoreInternals(store);
+      if (!store._listeners.has(internals.onDispatch)) {
+        store._listeners.add(internals.onDispatch);
+        internals.baseState = previousState;
+      }
+      internals.entries.push({
+        action,
+        lane,
+        state,
+        pendingRoots: new Set(),
+        committedRoots: new Set(),
+      });
+      if (storesDispatchedInTransition === null) {
+        storesDispatchedInTransition = new Set();
+      }
+      storesDispatchedInTransition.add(internals);
+    }
+  }
+  const stores = storesDispatchedInTransition;
   if (stores === null) {
     return;
   }
-  pendingTransitionStores = null;
-  stores.forEach(store => {
-    store._isTransitionQueued = false;
-    if (transitionLane !== NoLane) {
-      let root = firstRoot;
+  storesDispatchedInTransition = null;
+  stores.forEach(internals => {
+    if (lane !== NoLane) {
+      // A root the Transition scheduled work on after the action was
+      // dispatched also waits to show it.
+      let root = firstScheduledRoot;
       while (root !== null) {
-        if (includesSomeLane(root.pendingLanes, transitionLane)) {
-          const storeLanes = store._roots.get(root);
-          markStoreRootBehind(store, root, transitionLane);
-          if (storeLanes !== undefined && storeLanes !== NoLanes) {
-            // Like entangleTransitionUpdate for a hook queue: a store is one
-            // queue, so its pending Transitions in a root render together.
-            markRootEntangled(
-              root,
-              mergeLanes(
-                intersectLanes(storeLanes, root.pendingLanes),
-                transitionLane,
-              ),
-            );
+        if (includesSomeLane(root.pendingLanes, lane)) {
+          const entries = internals.entries;
+          for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            if (entry.lane === lane && !entry.committedRoots.has(root)) {
+              if (!internals.roots.has(root)) {
+                addStoreRoot(internals, root, 0);
+              }
+              entry.pendingRoots.add(root);
+            }
           }
         }
         root = root.next;
       }
     }
-    if (
-      transitionLane !== NoLane &&
-      transitionLane === peekEntangledActionLane()
-    ) {
-      const action = peekEntangledActionThenable();
-      if (action !== null && store._pendingAction !== action) {
-        store._pendingAction = action;
-        const settle = () => {
-          if (store._pendingAction === action) {
-            store._pendingAction = null;
-            finishStoreRoots(store);
-          }
-        };
-        action.then(settle, settle);
-      }
-    }
-    if (store._rootsBehind === 0 && store._pendingAction === null) {
-      store._sync = store._head;
-      store._roots.clear();
-      store._rootVersions.clear();
-    }
+    compactStoreEntries(internals);
   });
 }
 
-// A store's state lives above every root, so a render that includes an async
-// Action's updates to a store waits for the Action at the root, like an update
-// to the root itself does.
+// Whether a reader shows something other than what its root shows now,
+// because it was not subscribed when an action was dispatched.
+export function didStoreReaderMissAction<S, T>(
+  reader: StoreReader<S, T>,
+): boolean {
+  return !isSameSelection(
+    reader,
+    readStoreState(reader.store, reader.root, NoLanes),
+  );
+}
+
+// A store's state behaves as if it lives above each root, so a render that
+// includes an async Action's actions waits for the Action at the root, like an
+// update to the root itself does.
 export function suspendIfRootReadsStoreAction(
   root: FiberRoot,
   lanes: Lanes,
 ): void {
-  if (storesWithPendingRoots.size === 0) {
+  const stores = rootStores.get(root);
+  if (stores === undefined) {
     return;
   }
-  const actionLane = peekEntangledActionLane();
   const action = peekEntangledActionThenable();
+  const actionLane = peekEntangledActionLane();
   if (action === null || !includesSomeLane(lanes, actionLane)) {
     return;
   }
-  const stores = Array.from(storesWithPendingRoots);
-  for (let i = 0; i < stores.length; i++) {
-    const store = stores[i];
-    const pendingLanes = store._roots.get(root);
-    if (
-      store._pendingAction === action &&
-      pendingLanes !== undefined &&
-      includesSomeLane(pendingLanes, actionLane)
-    ) {
-      // TODO: Instead of the throwing the thenable directly, throw a
-      // special object like `use` does so we can detect if it's captured
-      // by userspace.
-      throw action;
-    }
-  }
-}
-
-// Called after a root commits.
-export function commitStoreRoots(root: FiberRoot): void {
-  storesWithPendingRoots.forEach(finishStoreRoots);
-}
-
-// A root has committed a store's Transition once the lanes it rendered it at
-// are no longer pending. A Transition in an async Action is not finished until
-// the Action is, because the Action can dispatch again at the same lane. Once
-// every root has committed, the state on screen is the latest state again.
-function finishStoreRoots<S, A>(store: ReactStore<S, A>): void {
-  if (store._pendingAction !== null) {
-    return;
-  }
-  store._roots.forEach((pendingLanes, key) => {
-    const root: FiberRoot = key as any;
-    if (
-      pendingLanes !== NoLanes &&
-      !includesSomeLane(root.pendingLanes, pendingLanes)
-    ) {
-      store._roots.set(root, NoLanes);
-      store._rootsBehind--;
-      if (!store._isTransitionQueued) {
-        // The root committed every Transition dispatched so far.
-        store._rootVersions.set(root, store._head);
+  stores.forEach(internals => {
+    const entries = internals.entries;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.lane === actionLane && !entry.committedRoots.has(root)) {
+        // TODO: Instead of throwing the thenable directly, throw a special
+        // object like `use` does so we can detect if it's captured by
+        // userspace.
+        throw action;
       }
     }
   });
-  if (store._rootsBehind === 0 && !store._isTransitionQueued) {
-    storesWithPendingRoots.delete(store);
-    store._roots.clear();
-    store._rootVersions.clear();
-    if (store._sync !== store._head) {
-      store._sync = store._head;
-      // Readers in roots that did not render the Transition catch up to it.
-      const readers = Array.from(store._readers);
-      for (let i = 0; i < readers.length; i++) {
-        readers[i](null, SyncLane);
+}
+
+// Called when a root commits, before its effects run. The root has committed
+// every action it has no work pending for.
+export function commitStoreRoot(root: FiberRoot): void {
+  const stores = rootStores.get(root);
+  if (stores === undefined) {
+    return;
+  }
+  stores.forEach(internals => {
+    const entries = internals.entries;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (
+        entry.pendingRoots.has(root) &&
+        !includesSomeLane(root.pendingLanes, entry.lane) &&
+        entry.lane !== peekEntangledActionLane()
+      ) {
+        entry.committedRoots.add(root);
       }
     }
-  }
+    compactStoreEntries(internals);
+  });
 }

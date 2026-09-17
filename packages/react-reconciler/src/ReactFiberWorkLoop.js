@@ -230,7 +230,7 @@ import {
   eventPriorityToLane,
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
-import {commitStoreRoots} from './ReactFiberStore';
+import {commitStoreRoot} from './ReactFiberStore';
 import {
   SelectiveHydrationException,
   beginWork,
@@ -487,7 +487,8 @@ let workInProgressRootDidAttachPingListener: boolean = false;
 // Most things in the work loop should deal with workInProgressRootRenderLanes.
 // Most things in begin/complete phases should deal with entangledRenderLanes.
 export let entangledRenderLanes: Lanes = NoLanes;
-// The lanes the root renders with its entanglements, which hidden trees add to.
+// The root render lanes after entanglement, before a hidden tree adds the lanes
+// it deferred to entangledRenderLanes.
 let workInProgressRootEntangledRenderLanes: Lanes = NoLanes;
 
 // Whether to root completed, errored, suspended, etc.
@@ -3777,6 +3778,10 @@ function commitRoot(
     suspendedRetryLanes,
   );
 
+  if (enableStore) {
+    commitStoreRoot(root);
+  }
+
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
 
@@ -4144,12 +4149,6 @@ function flushLayoutEffects(): void {
       setCurrentUpdatePriority(previousPriority);
       ReactSharedInternals.T = prevTransition;
     }
-  }
-
-  if (enableStore) {
-    // After layout effects, so readers in this root have published what they
-    // committed.
-    commitStoreRoots(root);
   }
 
   const completedRenderEndTime = pendingEffectsRenderEndTime;

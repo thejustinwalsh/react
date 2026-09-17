@@ -209,7 +209,6 @@ export function useStore<S, T>(
   selector?: (state: S, previous: T | void) => T,
 ): S | T {
   const dispatcher = resolveDispatcher();
-  // $FlowFixMe[not-a-function] This is unstable, thus optional
   return dispatcher.useStore(store, selector);
 }
 

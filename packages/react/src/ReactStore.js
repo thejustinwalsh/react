@@ -7,8 +7,7 @@
  * @flow
  */
 
-import type {ReactStore, StoreUpdate, StoreVersion} from 'shared/ReactTypes';
-import type {Transition} from './ReactStartTransition';
+import type {ReactStore} from 'shared/ReactTypes';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {REACT_STORE_TYPE} from 'shared/ReactSymbols';
@@ -31,129 +30,56 @@ export function createStore<S, A>(
   initialState: S,
   reducer?: (S, A) => S,
 ): ReactStore<S, A> {
-  const actualReducer: (S, A) => S =
-    reducer === undefined ? (basicStateReducer as any) : reducer;
-  const initial: StoreVersion<S> = {state: initialState};
-  const subscriptions: Set<(action: A) => void> = new Set();
+  let state = initialState;
+  const subscriptions: Set<() => void> = new Set();
   const store: ReactStore<S, A> = {
     $$typeof: REACT_STORE_TYPE,
     getState(): S {
-      return store._head.state;
+      return state;
     },
     dispatch(action: A): void {
       const transition = ReactSharedInternals.T;
-      if (
-        enableGestureTransition &&
-        transition !== null &&
-        transition.gesture
-      ) {
-        throw new Error(
-          'Cannot setState on regular state inside a startGestureTransition. ' +
-            'Gestures can only update the useOptimistic() hook. There should be no ' +
-            'side-effects associated with starting a Gesture until its Action is ' +
-            'invoked. Move side-effects to the Action instead.',
-        );
-      }
-      const head = store._head;
-      const sync = store._sync;
-      const isTransition = transition !== null;
-
-      const headState = actualReducer(head.state, action);
-      const nextHead: StoreVersion<S> = is(headState, head.state)
-        ? head
-        : {state: headState};
-
-      // A Transition leaves the state a root shows alone. A blocking action
-      // applies to it immediately, the way React rebases updates to useState.
-      let nextSync = sync;
-      if (!isTransition) {
-        if (sync === head) {
-          nextSync = nextHead;
-        } else {
-          const syncState = actualReducer(sync.state, action);
-          if (!is(syncState, sync.state)) {
-            nextSync = {state: syncState};
-          }
-          store._rootVersions.forEach((version, root) => {
-            const state = actualReducer(version.state, action);
-            if (!is(state, version.state)) {
-              store._rootVersions.set(root, {state});
-            }
-          });
+      if (enableGestureTransition) {
+        if (transition !== null && transition.gesture) {
+          throw new Error(
+            'Cannot dispatch to a store inside a startGestureTransition. ' +
+              'Gestures can only update the useOptimistic() hook.',
+          );
         }
       }
-      // The renderer marks the roots this Transition scheduled work on when
-      // its scope finishes.
-      const isMarkedByRenderer =
-        transition !== null && ReactSharedInternals.S !== null;
-      const didChange = nextHead !== head || nextSync !== sync;
-      store._head = nextHead;
-      store._sync = nextSync;
-      // Like an update to a hook queue, a Transition on a store that already
-      // has one pending entangles with it even if it changes nothing.
-      if (
-        transition !== null &&
-        isMarkedByRenderer &&
-        (didChange || store._rootsBehind > 0 || store._isTransitionQueued)
-      ) {
-        queueTransitionStore(transition, store);
+      const previousState = state;
+      const nextState = store._reducer(previousState, action);
+      // Renderers are told first, so one that is rendering can reject the
+      // action before the state changes. They are told of an action that
+      // changes nothing too, which can still apply to what a root shows.
+      store._listeners.forEach(listener => listener(action, nextState));
+      state = nextState;
+      if (transition !== null && store._listeners.size === 0) {
+        // A renderer that renders this Transition picks it up when the
+        // Transition's scope finishes.
+        if (transition.storeActions == null) {
+          transition.storeActions = [];
+        }
+        transition.storeActions.push({
+          store,
+          action,
+          previousState,
+          state: nextState,
+        });
       }
-      // Every action reaches every reader, as every setState reaches its hook.
-      const update: StoreUpdate<S, A> = {
-        action,
-        version: null,
-        head,
-        nextHead,
-        sync: isTransition ? null : sync,
-        nextSync,
-      };
-      const readers = Array.from(store._readers);
-      for (let i = 0; i < readers.length; i++) {
-        readers[i](update);
+      if (!is(nextState, previousState)) {
+        subscriptions.forEach(callback => callback());
       }
-      if (!didChange) {
-        return;
-      }
-      // Nothing waits on this dispatch, so the state on screen is the latest.
-      if (
-        !isMarkedByRenderer &&
-        !store._isTransitionQueued &&
-        store._pendingAction === null &&
-        store._rootsBehind === 0
-      ) {
-        store._sync = store._head;
-        store._roots.clear();
-        store._rootVersions.clear();
-      }
-      subscriptions.forEach(callback => callback(action));
     },
-    subscribe(callback: (action: A) => void): () => void {
+    subscribe(callback: () => void): () => void {
       subscriptions.add(callback);
       return () => {
         subscriptions.delete(callback);
       };
     },
-    _reducer: actualReducer,
-    _initial: initial,
-    _head: initial,
-    _sync: initial,
-    _readers: new Set(),
-    _roots: new Map(),
-    _rootsBehind: 0,
-    _rootVersions: new Map(),
-    _isTransitionQueued: false,
-    _pendingAction: null,
+    _initialState: initialState,
+    _reducer: reducer === undefined ? (basicStateReducer as any) : reducer,
+    _listeners: new Set(),
   };
   return store;
-}
-
-function queueTransitionStore<S, A>(
-  transition: Transition,
-  store: ReactStore<S, A>,
-): void {
-  store._isTransitionQueued = true;
-  if (transition.stores === null) {
-    transition.stores = new Set();
-  }
-  transition.stores.add(store);
 }

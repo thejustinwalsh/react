@@ -491,9 +491,10 @@ describe('useStore', () => {
     textCache = new Map();
     const root = ReactNoop.createRoot();
     const outputs = [];
+    const logs = [];
     const step = async callback => {
       await act(callback);
-      Scheduler.unstable_clearLog();
+      logs.push(Scheduler.unstable_clearLog());
       outputs.push(root.getChildrenAsJSX());
     };
     await step(() => root.render(<App />));
@@ -501,7 +502,7 @@ describe('useStore', () => {
     await step(() => startTransition(() => dispatch({key: 'b', value: 'B1'})));
     await step(() => dispatch({key: 'b', value: 'B2'}));
     await step(() => resolveText('A1'));
-    return outputs;
+    return {outputs, logs};
   }
 
   // @gate enableStore
@@ -525,7 +526,7 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
-  it('catches up a root that did not render the Transition once it commits', async () => {
+  it('shows a Transition in a root that mounts with no work pending for it', async () => {
     const store = createStore(0, (n, by) => n + by);
     function Stalls() {
       const n = useStore(store);
@@ -551,14 +552,14 @@ describe('useStore', () => {
     await act(() => startTransition(() => store.dispatch(10)));
     assertLog(['Loading']);
 
-    // A root that mounts while root B is behind shows the state before the
-    // Transition.
+    // Roots are independent: one that has no work pending for the Transition
+    // shows it while root B still waits on it.
     const rootC = ReactNoop.createRoot();
     await act(() => rootC.render(<Late />));
-    assertLog(['c0']);
+    assertLog(['c10']);
 
     await act(() => resolveText('data'));
-    assertLog(['b10', 'c10']);
+    assertLog(['b10']);
     expect(rootB).toMatchRenderedOutput('b10');
     expect(rootC).toMatchRenderedOutput('c10');
   });
@@ -703,20 +704,20 @@ describe('useStore', () => {
 
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
-    Scheduler.unstable_clearLog();
+    assertLog(['clicked:0', 'Loading']);
     await act(() => resolveCount());
-    Scheduler.unstable_clearLog();
+    assertLog(['count:0']);
     expect(root).toMatchRenderedOutput('clicked:0count:0');
 
     await act(() => {
       setCount(1);
       startTransition(() => store.dispatch(() => countLater(1)));
     });
-    Scheduler.unstable_clearLog();
+    assertLog(['clicked:1', 'count:0', 'clicked:1', 'Loading']);
     expect(root).toMatchRenderedOutput('clicked:1count:0');
 
     await act(() => resolveCount());
-    Scheduler.unstable_clearLog();
+    assertLog(['clicked:1', 'count:1']);
     expect(root).toMatchRenderedOutput('clicked:1count:1');
   });
 
@@ -799,10 +800,10 @@ describe('useStore', () => {
 
     // The reader may render to find out, but it does not commit.
     await act(() => store.dispatch(s => ({...s, theme: 'light'})));
-    Scheduler.unstable_clearLog();
+    assertLog([]);
     expect(commits).toBe(2);
     await act(() => store.dispatch(s => ({...s, theme: 'dark'})));
-    Scheduler.unstable_clearLog();
+    assertLog([]);
     expect(commits).toBe(2);
   });
 
@@ -849,14 +850,15 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
-  it('notifies subscribers with the dispatched action', () => {
+  it('notifies subscribers when the state changes', () => {
     const store = createStore(0, (n, action) => n + action.by);
-    const actions = [];
-    const unsubscribe = store.subscribe(action => actions.push(action));
+    const states = [];
+    const unsubscribe = store.subscribe(() => states.push(store.getState()));
     store.dispatch({by: 2});
+    store.dispatch({by: 0});
     unsubscribe();
     store.dispatch({by: 3});
-    expect(actions).toEqual([{by: 2}]);
+    expect(states).toEqual([2]);
     expect(store.getState()).toBe(5);
   });
 
@@ -1098,19 +1100,19 @@ describe('useStore', () => {
 
     // Root B commits the first Transition. Root A waits for data.
     await act(() => startTransition(() => store.dispatch(10)));
-    Scheduler.unstable_clearLog();
+    assertLog(['b10']);
     expect(rootA).toMatchRenderedOutput('a0');
     expect(rootB).toMatchRenderedOutput('b10');
 
     // Both roots wait on the second.
     await act(() => startTransition(() => store.dispatch(20)));
-    Scheduler.unstable_clearLog();
+    assertLog([]);
     expect(rootA).toMatchRenderedOutput('a0');
     expect(rootB).toMatchRenderedOutput('b10');
 
     // A blocking mount in root B shows what root B shows.
     await act(() => showReader(true));
-    Scheduler.unstable_clearLog();
+    assertLog(['b10', 'new10', 'new20']);
     expect(rootB).toMatchRenderedOutput('b10new10');
   });
 
@@ -1168,7 +1170,7 @@ describe('useStore', () => {
   });
 
   // @gate enableStore && enableGestureTransition
-  it('throws like setState when dispatching inside a gesture Transition', async () => {
+  it('throws when dispatching inside a gesture Transition', async () => {
     const store = createStore(0);
     function App() {
       return <Text text={String(useStore(store))} />;
@@ -1186,7 +1188,7 @@ describe('useStore', () => {
       }
     });
     expect(error.message).toContain(
-      'Cannot setState on regular state inside a startGestureTransition.',
+      'Cannot dispatch to a store inside a startGestureTransition.',
     );
     // Nothing changed, so nothing renders.
     expect(store.getState()).toBe(0);
@@ -1216,7 +1218,7 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
-  it('does not expose a nested Transition before the outer one commits', async () => {
+  it('waits for the outer Transition to show a nested one only in the roots it renders', async () => {
     const store = createStore(0);
     let setPage;
     function Page() {
@@ -1245,12 +1247,12 @@ describe('useStore', () => {
     );
     assertLog(['Loading']);
 
-    // Root A is still waiting on the Transition, so a new reader elsewhere
-    // shows the state from before it.
+    // Root A is still waiting on the Transition. Root B has no work pending
+    // for it, so it shows it.
     const rootB = ReactNoop.createRoot();
     await act(() => rootB.render(<Reader />));
-    assertLog(['n0']);
-    expect(rootB).toMatchRenderedOutput('n0');
+    assertLog(['n1']);
+    expect(rootB).toMatchRenderedOutput('n1');
   });
 
   // @gate enableStore
@@ -1285,13 +1287,12 @@ describe('useStore', () => {
     await waitForAll(['store1']);
     expect(microtaskCount).toBe(withState);
 
-    // Nothing reads this store, but the scheduling pass still settles it: one
-    // microtask, as for any update.
+    // Nothing reads this store, so the Transition schedules no work.
     const unread = createStore(0);
     microtaskCount = 0;
     startTransition(() => unread.dispatch(1));
     await waitForAll([]);
-    expect(microtaskCount).toBe(1);
+    expect(microtaskCount).toBe(0);
   });
 
   // @gate enableStore
@@ -1356,19 +1357,18 @@ describe('useStore', () => {
         await new Promise(resolve => (finishAction = resolve));
       }),
     );
-    Scheduler.unstable_clearLog();
+    assertLog([]);
     // Like useState, the Action's update waits for the Action.
     expect(root).toMatchRenderedOutput('2');
 
     // A blocking update applies to the state on screen.
     await act(() => store.dispatch('increment'));
-    Scheduler.unstable_clearLog();
+    assertLog(['3']);
     expect(root).toMatchRenderedOutput('3');
 
     await act(() => finishAction());
-    Scheduler.unstable_clearLog();
+    assertLog(['5']);
     expect(root).toMatchRenderedOutput('5');
     expect(store.getState()).toBe(5);
-    Scheduler.unstable_clearLog();
   });
 });

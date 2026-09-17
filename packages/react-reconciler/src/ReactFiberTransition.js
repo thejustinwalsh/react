@@ -49,10 +49,11 @@ import {
 } from './ReactFiberAsyncAction';
 import {startAsyncTransitionTimer} from './ReactProfilerTimer';
 import {
-  ensureScheduleIsScheduled,
+  didCurrentEventScheduleTransition,
   firstScheduledRoot,
+  requestTransitionLane,
 } from './ReactFiberRootScheduler';
-import {queueTransitionStores} from './ReactFiberStore';
+import {finishStoreTransition} from './ReactFiberStore';
 import {
   startScheduledGesture,
   cancelScheduledGesture,
@@ -85,15 +86,6 @@ ReactSharedInternals.S = function onStartTransitionFinishForReconciler(
   transition: Transition,
   returnValue: mixed,
 ) {
-  if (enableStore) {
-    const stores = transition.stores;
-    if (stores !== null) {
-      queueTransitionStores(stores);
-      // Roots are marked when the event's work is scheduled, even if the
-      // dispatch scheduled none.
-      ensureScheduleIsScheduled();
-    }
-  }
   markTransitionStarted();
   if (
     typeof returnValue === 'object' &&
@@ -137,6 +129,14 @@ ReactSharedInternals.S = function onStartTransitionFinishForReconciler(
         entangleAsyncTransitionTypes(transitionTypes);
       }
     }
+  }
+  if (enableStore) {
+    finishStoreTransition(
+      transition.storeActions,
+      didCurrentEventScheduleTransition()
+        ? requestTransitionLane(transition)
+        : NoLane,
+    );
   }
   if (prevOnStartTransitionFinish !== null) {
     prevOnStartTransitionFinish(transition, returnValue);

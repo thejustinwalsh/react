@@ -989,7 +989,7 @@ describe('ReactTransition', () => {
     await act(() => {
       setPage('A');
     });
-    Scheduler.unstable_clearLog();
+    assertLog(['Suspend! [A]', 'Loading...', 'Suspend! [A]']);
     expect(root).toMatchRenderedOutput('Loading...count:0');
 
     // Two Transitions wait for the count. The count's queue entangles them. The
@@ -1000,14 +1000,21 @@ describe('ReactTransition', () => {
         setCount(1);
       });
     });
-    Scheduler.unstable_clearLog();
+    assertLog([
+      'Suspend! [B]',
+      'Loading...',
+      'Suspend! [count:1]',
+      'Suspend! [B]',
+      'Loading...',
+      'Suspend! [count:1]',
+    ]);
     await act(() => {
       startTransition(() => {
         setPage('home');
         setCount(2);
       });
     });
-    Scheduler.unstable_clearLog();
+    assertLog(['home', 'Suspend! [count:2]']);
     expect(root).toMatchRenderedOutput('Loading...count:0');
 
     // Both Transitions commit together, including the update made while hidden.
