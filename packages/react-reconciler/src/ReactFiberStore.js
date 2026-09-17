@@ -518,7 +518,7 @@ export function finishStoreTransition(
       internals.action !== action
     ) {
       internals.action = action;
-      const onActionFinish = () => finishStoreAction(internals);
+      const onActionFinish = () => finishStoreAction(internals, lane);
       action.then(onActionFinish, onActionFinish);
     }
     if (lane !== NoLane) {
@@ -548,15 +548,22 @@ export function finishStoreTransition(
 
 // Called when an async Action the store has actions in finishes. A root that
 // had no work pending for them shows them now.
-function finishStoreAction<S, A>(internals: StoreInternals<S, A>): void {
+function finishStoreAction<S, A>(
+  internals: StoreInternals<S, A>,
+  lane: Lane,
+): void {
   internals.action = null;
   internals.version++;
+  // Readers show the Action's updates in its lane, together, and without
+  // showing a fallback.
   internals.readers.forEach(reader => {
     if (didStoreReaderMissAction(reader)) {
       const fiber = reader.fiber;
-      const root = enqueueConcurrentRenderForLane(fiber, SyncLane);
+      const readerLane =
+        (fiber.mode & ConcurrentMode) === NoMode ? SyncLane : lane;
+      const root = enqueueConcurrentRenderForLane(fiber, readerLane);
       if (root !== null) {
-        scheduleUpdateOnFiber(root, fiber, SyncLane);
+        scheduleUpdateOnFiber(root, fiber, readerLane);
       }
     }
   });
