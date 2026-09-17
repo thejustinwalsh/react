@@ -510,7 +510,7 @@ function useStore<S, T>(
   // Advance the current hook index the same number of times
   // so that subsequent hooks have the right memoized state.
   const hook = nextHook(); // Store
-  nextHook(); // Effect
+  nextHook(); // LayoutEffect
   let value;
   if (hook !== null) {
     value = hook.memoizedState;

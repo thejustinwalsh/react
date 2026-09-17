@@ -2032,7 +2032,9 @@ function mountStore<S, T>(
     value,
   };
   hook.queue = reader;
-  mountEffect(subscribeToReactStore.bind(null, reader), [store]);
+  // Subscribed while committing, so an action dispatched after the commit
+  // reaches the reader in the lane it was dispatched in.
+  mountLayoutEffect(subscribeToReactStore.bind(null, reader), [store]);
   fiber.flags |= UpdateEffect;
   pushSimpleEffect(
     HookHasEffect | HookInsertion,
@@ -2081,7 +2083,7 @@ function updateStore<S, T>(
     };
     hook.queue = reader;
   }
-  updateEffect(subscribeToReactStore.bind(null, reader), [store]);
+  updateLayoutEffect(subscribeToReactStore.bind(null, reader), [store]);
   if (reader.selector !== actualSelector || !is(reader.value, value)) {
     fiber.flags |= UpdateEffect;
     pushSimpleEffect(

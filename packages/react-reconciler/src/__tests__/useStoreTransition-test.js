@@ -15,6 +15,7 @@ let Scheduler;
 let act;
 let assertLog;
 let waitForAll;
+let waitForPaint;
 let createStore;
 let useStore;
 let useState;
@@ -55,6 +56,7 @@ describe('useStore in a Transition', () => {
 
     const InternalTestUtils = require('internal-test-utils');
     waitForAll = InternalTestUtils.waitForAll;
+    waitForPaint = InternalTestUtils.waitForPaint;
     act = InternalTestUtils.act;
     assertLog = InternalTestUtils.assertLog;
   });
@@ -820,5 +822,36 @@ describe('useStore in a Transition', () => {
     await act(() => resolveText('about'));
     assertLog(['about', 'n10']);
     expect(rootB).toMatchRenderedOutput('aboutn10');
+  });
+
+  // @gate enableStore
+  it('does not show a fallback for a Transition dispatched right after a reader commits', async () => {
+    const store = createStore(0);
+    function Reader() {
+      const n = useStore(store);
+      if (n >= 10) {
+        readText('data');
+      }
+      return <Text text={'n' + n} />;
+    }
+    const root = ReactNoop.createRoot();
+    root.render(
+      <Suspense fallback={<Text text="Loading" />}>
+        <Reader />
+      </Suspense>,
+    );
+    // Committed, before passive effects run.
+    await waitForPaint(['n0']);
+    expect(root).toMatchRenderedOutput('n0');
+
+    startTransition(() => store.dispatch(10));
+    await waitForAll(['Loading']);
+    // The reader renders the action in its Transition, so it keeps showing the
+    // previous state while the new one suspends.
+    expect(root).toMatchRenderedOutput('n0');
+
+    await act(() => resolveText('data'));
+    assertLog(['n10']);
+    expect(root).toMatchRenderedOutput('n10');
   });
 });
