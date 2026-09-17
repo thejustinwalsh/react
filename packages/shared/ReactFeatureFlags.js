@@ -110,6 +110,11 @@ export const enableDefaultTransitionIndicator = __EXPERIMENTAL__;
 export const enableOptimisticKey = __EXPERIMENTAL__;
 export const enableStore = __EXPERIMENTAL__;
 
+// Entangled updates always commit together: entangling a lane also entangles it
+// with every lane the lanes it is entangled with are, and an update made while
+// hidden renders with the lanes its root's render is entangled with.
+export const enableStrictEntanglement = __EXPERIMENTAL__;
+
 /**
  * Switches Fiber creation to a simple object instead of a constructor.
  */

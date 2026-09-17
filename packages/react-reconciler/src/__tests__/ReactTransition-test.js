@@ -870,6 +870,157 @@ describe('ReactTransition', () => {
     },
   );
 
+  // @gate enableLegacyCache && enableStrictEntanglement
+  it(
+    'a transition in a reused lane is entangled with everything the ' +
+      'transitions it is entangled with are',
+    async () => {
+      let setTick;
+      let setState;
+      let setIsOpen;
+      function App() {
+        const [, _setTick] = useState(0);
+        const [state, _setState] = useState({page: 'home', count: 0});
+        const [, _setIsOpen] = useState(false);
+        setTick = _setTick;
+        setState = _setState;
+        setIsOpen = _setIsOpen;
+        return (
+          <>
+            <Suspense fallback={<Text text="Loading..." />}>
+              {state.page === 'home' ? (
+                <Text text="home" />
+              ) : (
+                <AsyncText text={state.page} />
+              )}
+            </Suspense>
+            <Text text={'count:' + state.count} />
+          </>
+        );
+      }
+
+      const root = ReactNoop.createRoot();
+      await act(() => {
+        root.render(<App />);
+      });
+      assertLog(['home', 'count:0']);
+
+      // Use up the first eight Transition lanes.
+      for (let i = 1; i <= 8; i++) {
+        await act(() => {
+          startTransition(() => {
+            setTick(i);
+          });
+        });
+        assertLog(['home', 'count:0']);
+      }
+
+      // The ninth lane waits for data.
+      await act(() => {
+        startTransition(() => {
+          setState(state => ({...state, page: 'A'}));
+        });
+      });
+      assertLog(['Suspend! [A]', 'Loading...', 'count:0']);
+
+      // The tenth lane updates the same state, so it is entangled with the
+      // ninth. It also updates another state.
+      await act(() => {
+        startTransition(() => {
+          setState(state => ({...state, count: state.count + 1}));
+          setIsOpen(true);
+        });
+      });
+      assertLog(['Suspend! [A]', 'Loading...', 'count:1']);
+      expect(root).toMatchRenderedOutput('homecount:0');
+
+      // The next Transition reuses the first lane, and updates the other state,
+      // so it is entangled with the tenth lane, and through it with the ninth.
+      await act(() => {
+        startTransition(() => {
+          setIsOpen(false);
+        });
+      });
+      assertLog(['Suspend! [A]', 'Loading...', 'count:1']);
+      // The count cannot commit without the page it was entangled with.
+      expect(root).toMatchRenderedOutput('homecount:0');
+
+      await act(() => {
+        resolveText('A');
+      });
+      assertLog(['A', 'count:1']);
+      expect(root).toMatchRenderedOutput('Acount:1');
+    },
+  );
+
+  // @gate enableLegacyCache && enableStrictEntanglement
+  it('an update made while hidden renders with the lanes it is entangled with', async () => {
+    let setPage;
+    let setCount;
+    function Page() {
+      const [page, _setPage] = useState('home');
+      setPage = _setPage;
+      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+    }
+    function App() {
+      const [count, _setCount] = useState(0);
+      setCount = _setCount;
+      return (
+        <>
+          <Suspense fallback={<Text text="Loading..." />}>
+            <Page />
+          </Suspense>
+          {count === 0 ? (
+            <Text text="count:0" />
+          ) : (
+            <AsyncText text={'count:' + count} />
+          )}
+        </>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['home', 'count:0']);
+
+    // Show the fallback.
+    await act(() => {
+      setPage('A');
+    });
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('Loading...count:0');
+
+    // Two Transitions wait for the count. The count's queue entangles them. The
+    // second updates the page while it is hidden.
+    await act(() => {
+      startTransition(() => {
+        setPage('B');
+        setCount(1);
+      });
+    });
+    Scheduler.unstable_clearLog();
+    await act(() => {
+      startTransition(() => {
+        setPage('home');
+        setCount(2);
+      });
+    });
+    Scheduler.unstable_clearLog();
+    expect(root).toMatchRenderedOutput('Loading...count:0');
+
+    // Both Transitions commit together, including the update made while hidden.
+    await act(() => {
+      resolveText('A');
+      resolveText('B');
+      resolveText('count:1');
+      resolveText('count:2');
+    });
+    assertLog(['home', 'count:2']);
+    expect(root).toMatchRenderedOutput('homecount:2');
+  });
+
   // @gate enableLegacyCache
   it('interrupt a refresh transition if a new transition is scheduled', async () => {
     const root = ReactNoop.createRoot();

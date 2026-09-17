@@ -61,6 +61,7 @@ import {
   enableDefaultTransitionIndicator,
   enableParallelTransitions,
   enableStore,
+  enableStrictEntanglement,
 } from 'shared/ReactFeatureFlags';
 import {resetOwnerStackLimit} from 'shared/ReactOwnerStackReset';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
@@ -486,6 +487,8 @@ let workInProgressRootDidAttachPingListener: boolean = false;
 // Most things in the work loop should deal with workInProgressRootRenderLanes.
 // Most things in begin/complete phases should deal with entangledRenderLanes.
 export let entangledRenderLanes: Lanes = NoLanes;
+// The lanes the root renders with its entanglements, which hidden trees add to.
+let workInProgressRootEntangledRenderLanes: Lanes = NoLanes;
 
 // Whether to root completed, errored, suspended, etc.
 let workInProgressRootExitStatus: RootExitStatus = RootInProgress;
@@ -777,6 +780,12 @@ export function getCommittingRoot(): FiberRoot | null {
 
 export function getWorkInProgressRootRenderLanes(): Lanes {
   return workInProgressRootRenderLanes;
+}
+
+export function getWorkInProgressRootEntangledRenderLanes(): Lanes {
+  return enableStrictEntanglement
+    ? workInProgressRootEntangledRenderLanes
+    : workInProgressRootRenderLanes;
 }
 
 export function hasPendingCommitEffects(): boolean {
@@ -2282,6 +2291,7 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   // and Sync lane in the same batch, but at Transition priority, because the
   // Sync lane already suspended.
   entangledRenderLanes = getEntangledLanes(root, lanes);
+  workInProgressRootEntangledRenderLanes = entangledRenderLanes;
 
   finishQueueingConcurrentUpdates();
 

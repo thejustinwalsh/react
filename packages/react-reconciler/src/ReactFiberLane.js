@@ -30,6 +30,7 @@ import {
   enableDefaultTransitionIndicator,
   enableGestureTransition,
   enableParallelTransitions,
+  enableStrictEntanglement,
 } from 'shared/ReactFeatureFlags';
 import {isDevToolsPresent} from './ReactFiberDevToolsHook';
 import {clz32} from './clz32';
@@ -1040,6 +1041,21 @@ export function markRootEntangled(root: FiberRoot, entangledLanes: Lanes) {
 
   const rootEntangledLanes = (root.entangledLanes |= entangledLanes);
   const entanglements = root.entanglements;
+  let transitiveLanes = entangledLanes;
+  if (enableStrictEntanglement) {
+    // The reverse also holds: entangling A with B also entangles B with C.
+    // Otherwise a lane that is rendered first, like a reused Transition lane,
+    // brings in A but not C.
+    let lanes = rootEntangledLanes;
+    while (lanes) {
+      const index = pickArbitraryLaneIndex(lanes);
+      const lane = 1 << index;
+      if ((lane & entangledLanes) | (entanglements[index] & entangledLanes)) {
+        transitiveLanes |= entanglements[index] & rootEntangledLanes;
+      }
+      lanes &= ~lane;
+    }
+  }
   let lanes = rootEntangledLanes;
   while (lanes) {
     const index = pickArbitraryLaneIndex(lanes);
@@ -1050,7 +1066,7 @@ export function markRootEntangled(root: FiberRoot, entangledLanes: Lanes) {
       // Is this lane transitively entangled with the newly entangled lanes?
       (entanglements[index] & entangledLanes)
     ) {
-      entanglements[index] |= entangledLanes;
+      entanglements[index] |= transitiveLanes;
     }
     lanes &= ~lane;
   }

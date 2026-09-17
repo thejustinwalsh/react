@@ -107,6 +107,7 @@ import {
 import {
   getWorkInProgressRoot,
   getWorkInProgressRootRenderLanes,
+  getWorkInProgressRootEntangledRenderLanes,
   scheduleUpdateOnFiber,
   requestUpdateLane,
   requestDeferredLane,
@@ -1401,7 +1402,10 @@ function updateReducerImpl<S, A>(
       // it's not a "base" update and we should disregard the extra base lanes
       // that were added to renderLanes when we entered the Offscreen tree.
       let shouldSkipUpdate = isHiddenUpdate
-        ? !isSubsetOfLanes(getWorkInProgressRootRenderLanes(), updateLane)
+        ? !isSubsetOfLanes(
+            getWorkInProgressRootEntangledRenderLanes(),
+            updateLane,
+          )
         : !isSubsetOfLanes(renderLanes, updateLane);
 
       if (enableGestureTransition && updateLane === GestureLane) {

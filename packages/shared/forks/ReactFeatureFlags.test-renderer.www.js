@@ -87,6 +87,7 @@ export const enableInternalInstanceMap: boolean = false;
 
 export const enableOptimisticKey: boolean = false;
 export const enableStore: boolean = false;
+export const enableStrictEntanglement: boolean = false;
 export const enableParallelTransitions: boolean = true;
 
 export const eprh_enableUseKeyedStateCompilerLint: boolean = false;

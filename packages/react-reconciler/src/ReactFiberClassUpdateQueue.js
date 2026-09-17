@@ -114,7 +114,7 @@ import {StrictLegacyMode} from './ReactTypeOfMode';
 import {
   markSkippedUpdateLanes,
   isUnsafeClassRenderPhaseUpdate,
-  getWorkInProgressRootRenderLanes,
+  getWorkInProgressRootEntangledRenderLanes,
 } from './ReactFiberWorkLoop';
 import {
   enqueueConcurrentClassUpdate,
@@ -567,7 +567,10 @@ export function processUpdateQueue<State>(
       // it's not a "base" update and we should disregard the extra base lanes
       // that were added to renderLanes when we entered the Offscreen tree.
       const shouldSkipUpdate = isHiddenUpdate
-        ? !isSubsetOfLanes(getWorkInProgressRootRenderLanes(), updateLane)
+        ? !isSubsetOfLanes(
+            getWorkInProgressRootEntangledRenderLanes(),
+            updateLane,
+          )
         : !isSubsetOfLanes(renderLanes, updateLane);
 
       if (shouldSkipUpdate) {
