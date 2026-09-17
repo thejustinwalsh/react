@@ -7,7 +7,7 @@
  * @flow
  */
 
-import type {ReactStore} from 'shared/ReactTypes';
+import type {ReactStore, TransitionStoreAction} from 'shared/ReactTypes';
 import type {Fiber, FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
 
@@ -75,6 +75,16 @@ type StoreInternals<S, A> = {
   roots: Map<FiberRoot, number>,
   onDispatch: (action: A, state: S) => void,
   strictReaders: number, // DEV-only
+  // Incremented whenever what a root reads from the log can change.
+  version: number,
+  // The last read of the log, and what it was read for. Every reader in a root
+  // reads the same.
+  cachedRoot: FiberRoot | null,
+  cachedLanes: Lanes,
+  cachedActionLane: Lane,
+  cachedVersion: number,
+  cachedState: S,
+  cachedSkippedLanes: Lanes,
 };
 
 const storeInternals: WeakMap<
@@ -104,6 +114,13 @@ function getStoreInternals<S, A>(
     onDispatch: (action: A, state: S) =>
       dispatchToStoreReaders(internals, action, state),
     strictReaders: 0,
+    version: 0,
+    cachedRoot: null,
+    cachedLanes: NoLanes,
+    cachedActionLane: NoLane,
+    cachedVersion: -1,
+    cachedState: store.getState(),
+    cachedSkippedLanes: NoLanes,
   };
   storeInternals.set(store, internals);
   return internals;
@@ -126,6 +143,44 @@ function isStoreEntryVisible<S, A>(
 }
 
 // The state of a store a root renders at these lanes.
+function readStoreEntries<S, A>(
+  internals: StoreInternals<S, A>,
+  root: FiberRoot,
+  lanes: Lanes,
+): void {
+  const actionLane = peekEntangledActionLane();
+  if (
+    internals.cachedVersion === internals.version &&
+    internals.cachedRoot === root &&
+    internals.cachedLanes === lanes &&
+    internals.cachedActionLane === actionLane
+  ) {
+    return;
+  }
+  const store = internals.store;
+  const entries = internals.entries;
+  let state = internals.baseState;
+  let skippedLanes = NoLanes;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!isStoreEntryVisible(entry, root, lanes)) {
+      skippedLanes = mergeLanes(skippedLanes, entry.lane);
+    } else if (skippedLanes !== NoLanes) {
+      // Rebased onto the actions this render shows.
+      state = store._reducer(state, entry.action);
+    } else {
+      state = entry.state;
+    }
+  }
+  internals.cachedVersion = internals.version;
+  internals.cachedRoot = root;
+  internals.cachedLanes = lanes;
+  internals.cachedActionLane = actionLane;
+  internals.cachedState = state;
+  internals.cachedSkippedLanes = skippedLanes;
+}
+
+// The state of a store a root renders at these lanes.
 export function readStoreState<S, A>(
   store: ReactStore<S, A>,
   root: FiberRoot,
@@ -135,20 +190,8 @@ export function readStoreState<S, A>(
   if (internals === undefined || internals.entries.length === 0) {
     return store.getState();
   }
-  const entries = internals.entries;
-  let state = internals.baseState;
-  let isRebasing = false;
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    if (!isStoreEntryVisible(entry, root, lanes)) {
-      isRebasing = true;
-    } else if (isRebasing) {
-      state = store._reducer(state, entry.action);
-    } else {
-      state = entry.state;
-    }
-  }
-  return state;
+  readStoreEntries(internals, root, lanes);
+  return internals.cachedState;
 }
 
 // The lanes of actions a render at these lanes leaves out, which the root still
@@ -159,18 +202,11 @@ export function getSkippedStoreLanes<S, A>(
   lanes: Lanes,
 ): Lanes {
   const internals = storeInternals.get(store);
-  if (internals === undefined) {
+  if (internals === undefined || internals.entries.length === 0) {
     return NoLanes;
   }
-  let skippedLanes = NoLanes;
-  const entries = internals.entries;
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    if (!isStoreEntryVisible(entry, root, lanes)) {
-      skippedLanes = mergeLanes(skippedLanes, entry.lane);
-    }
-  }
-  return skippedLanes;
+  readStoreEntries(internals, root, lanes);
+  return internals.cachedSkippedLanes;
 }
 
 function requestStoreUpdateLane(): Lane {
@@ -222,6 +258,7 @@ function dispatchToStoreReaders<S, A>(
     committedRoots: new Set(),
   };
   entries.push(entry);
+  internals.version++;
 
   if (isTransitionLane(lane)) {
     internals.roots.forEach((count, root) => {
@@ -281,6 +318,7 @@ function markStoreEntryPendingRoots<S, A>(
   internals.roots.forEach((readers, root) => {
     if (includesSomeLane(root.pendingLanes, entry.lane)) {
       entry.pendingRoots.add(root);
+      internals.version++;
     }
   });
 }
@@ -320,6 +358,7 @@ function compactStoreEntries<S, A>(internals: StoreInternals<S, A>): void {
   if (count > 0) {
     internals.baseState = entries[count - 1].state;
     entries.splice(0, count);
+    internals.version++;
   }
   internals.roots.forEach((readers, root) => {
     if (readers === 0 && !hasPendingStoreEntries(internals, root)) {
@@ -416,13 +455,6 @@ export function subscribeToStoreReader<S, T>(
   };
 }
 
-export type TransitionStoreAction = {
-  store: ReactStore<any, any>,
-  action: mixed,
-  previousState: mixed,
-  state: mixed,
-};
-
 // Called when a Transition's scope finishes. Actions dispatched in it to a
 // store no renderer was listening to are shown by a root that renders the
 // Transition, even if it has no readers of the store yet.
@@ -438,6 +470,7 @@ export function finishStoreTransition(
         store._listeners.add(internals.onDispatch);
         internals.baseState = previousState;
       }
+      internals.version++;
       internals.entries.push({
         action,
         lane,
@@ -471,6 +504,7 @@ export function finishStoreTransition(
                 addStoreRoot(internals, root, 0);
               }
               entry.pendingRoots.add(root);
+              internals.version++;
             }
           }
         }
@@ -539,6 +573,7 @@ export function commitStoreRoot(root: FiberRoot): void {
         entry.lane !== peekEntangledActionLane()
       ) {
         entry.committedRoots.add(root);
+        internals.version++;
       }
     }
     compactStoreEntries(internals);

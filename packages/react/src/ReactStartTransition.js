@@ -12,9 +12,9 @@ import type {
   StartTransitionOptions,
   GestureProvider,
   GestureOptions,
+  TransitionStoreAction,
 } from 'shared/ReactTypes';
 import type {TransitionTypes} from './ReactTransitionType';
-import type {TransitionStoreAction} from 'react-reconciler/src/ReactFiberStore';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 

@@ -70,6 +70,14 @@ export type ReactContext<T> = {
   displayName?: string,
 };
 
+// An action dispatched in a Transition to a store no renderer was listening to.
+export type TransitionStoreAction = {
+  store: ReactStore<any, any>,
+  action: mixed,
+  previousState: mixed,
+  state: mixed,
+};
+
 export type ReactStore<S, A> = {
   $$typeof: symbol | number,
   getState(): S,
