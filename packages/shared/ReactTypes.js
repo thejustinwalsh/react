@@ -87,6 +87,10 @@ export type ReactStore<S, A> = {
   // The state a server rendered from, when the store is created from it.
   _initialState: S,
   _reducer: (S, A) => S,
+  // A selection is read from the store it was selected from.
+  select<T>(select: (state: S, previous: T | void) => T): ReactStore<T, empty>,
+  _parent?: ReactStore<any, any>,
+  _select?: (state: any, previous: any) => any,
 };
 
 export type ReactPortal = {

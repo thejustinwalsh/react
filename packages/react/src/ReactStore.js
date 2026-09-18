@@ -19,6 +19,44 @@ function basicStateReducer<S>(state: S, action: S | (S => S)): S {
   return typeof action === 'function' ? action(state) : action;
 }
 
+// A selection of a store's state. It is read like a store, and refined like
+// one, but only the store it came from is dispatched to.
+function createSelection<S, T>(
+  parent: ReactStore<S, any>,
+  select: (state: S, previous: T | void) => T,
+): ReactStore<T, empty> {
+  const selection: ReactStore<T, empty> = {
+    $$typeof: REACT_STORE_TYPE,
+    getState(): T {
+      return select(parent.getState(), undefined);
+    },
+    dispatch(action: empty): void {
+      throw new Error(
+        'Cannot dispatch to a selection of a store. Dispatch to the store it ' +
+          'was selected from.',
+      );
+    },
+    subscribe(callback: () => void): () => void {
+      let previous = selection.getState();
+      return parent.subscribe(() => {
+        const next = select(parent.getState(), previous);
+        if (!is(next, previous)) {
+          previous = next;
+          callback();
+        }
+      });
+    },
+    select<U>(next: (state: T, previous: U | void) => U): ReactStore<U, empty> {
+      return createSelection(selection, next);
+    },
+    _initialState: select(parent._initialState, undefined),
+    _reducer: (state: T, action: empty) => state,
+    _parent: parent,
+    _select: select,
+  };
+  return selection;
+}
+
 declare export function createStore<S>(
   initialState: S,
 ): ReactStore<S, S | ((previous: S) => S)>;
@@ -70,6 +108,9 @@ export function createStore<S, A>(
       return () => {
         subscriptions.delete(callback);
       };
+    },
+    select<T>(select: (state: S, previous: T | void) => T): ReactStore<T, empty> {
+      return createSelection(store, select);
     },
     _initialState: initialState,
     _reducer: reducer === undefined ? (basicStateReducer as any) : reducer,

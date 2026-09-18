@@ -174,7 +174,9 @@ import {
   getEagerStoreSelection,
   noEagerSelection,
   pushStoreDependency,
-  getCommittedStoreDependencyState,
+  getCommittedStoreDependencyValue,
+  getStoreSource,
+  readStoreSelection,
 } from './ReactFiberStore';
 
 import {scheduleGesture} from './ReactFiberGestureScheduler';
@@ -1209,7 +1211,7 @@ function use<T>(usable: Usable<T>): T {
 
 // use() records the read on the fiber, like a context, so it can be called in
 // a condition or a loop. The commit subscribes it.
-function readStoreWithUse<S>(store: ReactStore<S, mixed>): S {
+function readStoreWithUse<T>(store: ReactStore<T, mixed>): T {
   const fiber = currentlyRenderingFiber;
   const root = getWorkInProgressRoot();
   if (root === null) {
@@ -1218,15 +1220,30 @@ function readStoreWithUse<S>(store: ReactStore<S, mixed>): S {
     );
   }
   validateStore(store);
-  const state = readStoreForRender(fiber, store, root);
-  if (!is(state, getCommittedStoreDependencyState(fiber, store))) {
+  const source = getStoreSource(store);
+  const sourceState = readStoreForRender(fiber, source, root);
+  const previous = getCommittedStoreDependencyValue(fiber, store);
+  const value = readStoreSelection(
+    store,
+    sourceState,
+    root,
+    previous === noEagerSelection ? undefined : (previous as any),
+  );
+  if (!is(value, previous)) {
     // Reading something other than the last commit did is an update, like a
     // state hook whose state changed.
     markWorkInProgressReceivedUpdate();
   }
-  pushStoreReadCheck(fiber, store, root, selectState as any, undefined, state);
-  pushStoreDependency(fiber, root, store, state, state);
-  return state;
+  pushStoreReadCheck(
+    fiber,
+    source,
+    root,
+    (state: any, prev: any) => readStoreSelection(store, state, root, prev),
+    previous === noEagerSelection ? undefined : (previous as any),
+    value,
+  );
+  pushStoreDependency(fiber, root, store, sourceState, value);
+  return value;
 }
 
 function useMemoCache(size: number): Array<mixed> {

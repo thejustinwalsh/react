@@ -615,4 +615,135 @@ describe('useStore', () => {
     assertLog(['a1', 'b0']);
     expect(root).toMatchRenderedOutput('a1b0');
   });
+
+  // @gate enableStore
+  it('reads a selection of a store', async () => {
+    const store = createStore({count: 0, other: 'a'}, (state, action) => ({
+      ...state,
+      ...action,
+    }));
+    const count = store.select(state => state.count);
+    function App() {
+      return <Text text={'n' + use(count)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['n0']);
+    expect(count.getState()).toBe(0);
+
+    await act(() => store.dispatch({count: 1}));
+    assertLog(['n1']);
+    expect(root).toMatchRenderedOutput('n1');
+
+    // Nothing this selection covers changed.
+    await act(() => store.dispatch({other: 'b'}));
+    assertLog([]);
+    expect(root).toMatchRenderedOutput('n1');
+  });
+
+  // @gate enableStore
+  it('refines a selection with another selection', async () => {
+    const store = createStore({rows: {a: 1, b: 2}}, (state, action) => ({
+      rows: {...state.rows, ...action},
+    }));
+    const rows = store.select(state => state.rows);
+    const a = rows.select(state => state.a);
+    function App() {
+      return <Text text={'a' + use(a)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['a1']);
+
+    await act(() => store.dispatch({b: 3}));
+    assertLog([]);
+    await act(() => store.dispatch({a: 9}));
+    assertLog(['a9']);
+    expect(root).toMatchRenderedOutput('a9');
+  });
+
+  // @gate enableStore
+  it('passes the previous selection to a select function', async () => {
+    const store = createStore({ids: [1, 2], version: 0}, (state, action) => ({
+      ...state,
+      ...action,
+    }));
+    const ids = store.select((state, previous) => {
+      const next = state.ids;
+      // Structural sharing: keep the identity a reader already rendered.
+      if (
+        previous !== undefined &&
+        previous.length === next.length &&
+        previous.every((id, i) => id === next[i])
+      ) {
+        return previous;
+      }
+      return next;
+    });
+    let renders = 0;
+    function App() {
+      renders++;
+      return <Text text={use(ids).join(',')} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['1,2']);
+    expect(renders).toBe(1);
+
+    // A new array with the same ids does not re-render.
+    await act(() => store.dispatch({ids: [1, 2], version: 1}));
+    assertLog([]);
+    expect(renders).toBe(1);
+
+    await act(() => store.dispatch({ids: [1, 2, 3]}));
+    assertLog(['1,2,3']);
+    expect(renders).toBe(2);
+  });
+
+  // @gate enableStore
+  it('reads a selection per item in a loop', async () => {
+    const store = createStore({a: 0, b: 0}, (state, key) => ({
+      ...state,
+      [key]: state[key] + 1,
+    }));
+    const selections = new Map();
+    function selectionFor(key) {
+      let selection = selections.get(key);
+      if (selection === undefined) {
+        selection = store.select(state => state[key]);
+        selections.set(key, selection);
+      }
+      return selection;
+    }
+    function Row({item}) {
+      return <Text text={item + use(selectionFor(item))} />;
+    }
+    function App() {
+      return (
+        <>
+          {['a', 'b'].map(item => (
+            <Row key={item} item={item} />
+          ))}
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['a0', 'b0']);
+
+    // Only the row whose selection changed renders.
+    await act(() => store.dispatch('a'));
+    assertLog(['a1']);
+    expect(root).toMatchRenderedOutput('a1b0');
+  });
+
+  // @gate enableStore
+  it('throws when a selection is dispatched to', async () => {
+    const store = createStore(0);
+    const selection = store.select(state => state);
+    expect(() => selection.dispatch(1)).toThrow(
+      'Cannot dispatch to a selection of a store. Dispatch to the store it ' +
+        'was selected from.',
+    );
+  });
 });

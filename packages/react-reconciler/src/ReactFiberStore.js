@@ -634,12 +634,82 @@ function finishStoreAction<S, A>(
   compactStoreEntries(internals);
 }
 
+// What each selection committed in each root, which is the previous value its
+// select function is given.
+const committedSelections: WeakMap<
+  ReactStore<any, any>,
+  WeakMap<FiberRoot, {value: any}>,
+> = new WeakMap();
+
+// The store a selection is selected from.
+export function getStoreSource<S>(
+  store: ReactStore<S, mixed>,
+): ReactStore<any, any> {
+  let source: ReactStore<any, any> = store;
+  while (source._parent != null) {
+    source = source._parent;
+  }
+  return source;
+}
+
+function getCommittedSelection<S>(
+  selection: ReactStore<S, mixed>,
+  root: FiberRoot,
+): S | void {
+  const roots = committedSelections.get(selection);
+  if (roots === undefined) {
+    return undefined;
+  }
+  const committed = roots.get(root);
+  return committed === undefined ? undefined : committed.value;
+}
+
+function commitSelection<S>(
+  selection: ReactStore<S, mixed>,
+  root: FiberRoot,
+  value: S,
+): void {
+  let roots = committedSelections.get(selection);
+  if (roots === undefined) {
+    roots = new WeakMap();
+    committedSelections.set(selection, roots);
+  }
+  const committed = roots.get(root);
+  if (committed === undefined) {
+    roots.set(root, {value});
+  } else {
+    committed.value = value;
+  }
+}
+
+// A selection's value for a root, from the state of the store it was selected
+// from. Each select function is given what it returned for this root before.
+export function readStoreSelection<S, T>(
+  selection: ReactStore<T, mixed>,
+  sourceState: S,
+  root: FiberRoot,
+  previous: T | void,
+): T {
+  const parent = selection._parent;
+  if (parent == null) {
+    return sourceState as any;
+  }
+  const parentState = readStoreSelection(
+    parent,
+    sourceState,
+    root,
+    getCommittedSelection(parent, root),
+  );
+  const select: (state: any, previous: T | void) => T = selection._select as any;
+  return select(parentState, previous);
+}
+
 // A store read with use() is recorded on the fiber, like a context, so it can
 // be read in a condition or a loop. The commit subscribes it.
 export function pushStoreDependency<S, T>(
   fiber: Fiber,
   root: FiberRoot,
-  store: ReactStore<S, mixed>,
+  store: ReactStore<T, mixed>,
   state: S,
   value: T,
 ): void {
@@ -676,10 +746,10 @@ export function pushStoreDependency<S, T>(
 }
 
 // What the fiber's last committed render read from this store, if it read it.
-export function getCommittedStoreDependencyState<S>(
+export function getCommittedStoreDependencyValue<T>(
   fiber: Fiber,
-  store: ReactStore<S, mixed>,
-): S | typeof noEagerSelection {
+  store: ReactStore<T, mixed>,
+): T | typeof noEagerSelection {
   const current = fiber.alternate;
   if (current === null || current.dependencies == null) {
     return noEagerSelection;
@@ -688,7 +758,7 @@ export function getCommittedStoreDependencyState<S>(
     current.dependencies.firstStore ?? null;
   while (dependency !== null) {
     if (dependency.store === store) {
-      return dependency.state;
+      return dependency.value;
     }
     dependency = dependency.next;
   }
@@ -739,6 +809,7 @@ export function commitStoreDependencies(
     } else {
       subscribeStoreDependency(finishedWork, dependency);
     }
+    commitSelection(dependency.store, dependency.root, dependency.value);
     dependency = dependency.next;
   }
   let dropped: StoreDependency | null = previous;
@@ -761,11 +832,14 @@ function subscribeStoreDependency(
   fiber: Fiber,
   dependency: StoreDependency,
 ): void {
+  const selection = dependency.store;
+  const root = dependency.root;
   const reader: StoreReader<any, any> = {
-    store: dependency.store,
-    root: dependency.root,
+    store: getStoreSource(selection),
+    root,
     fiber,
-    selector: (state: any) => state,
+    selector: (state: any, previous: any) =>
+      readStoreSelection(selection, state, root, previous),
     value: dependency.value,
     state: dependency.state,
     eagerState: noEagerSelection,
