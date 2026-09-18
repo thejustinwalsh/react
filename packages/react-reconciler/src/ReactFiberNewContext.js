@@ -33,6 +33,7 @@ import {
 } from './ReactFiberFlags';
 
 import is from 'shared/objectIs';
+import {enableStore} from 'shared/ReactFeatureFlags';
 import {getHostTransitionProvider} from './ReactFiberHostContext';
 
 const valueCursor: StackCursor<mixed> = createCursor(null);
@@ -545,8 +546,11 @@ export function prepareToReadContext(
 
   const dependencies = workInProgress.dependencies;
   if (dependencies !== null) {
-    // Reset the work-in-progress list
+    // Reset the work-in-progress lists
     dependencies.firstContext = null;
+    if (enableStore) {
+      dependencies.firstStore = null;
+    }
   }
 }
 

@@ -173,6 +173,8 @@ import {
   didStoreReaderMissAction,
   getEagerStoreSelection,
   noEagerSelection,
+  pushStoreDependency,
+  getCommittedStoreDependencyState,
 } from './ReactFiberStore';
 
 import {scheduleGesture} from './ReactFiberGestureScheduler';
@@ -1186,9 +1188,7 @@ function use<T>(usable: Usable<T>): T {
       return readContext(context);
     } else if (enableStore && usable.$$typeof === REACT_STORE_TYPE) {
       const store: ReactStore<T, mixed> = usable as any;
-      // The dispatcher knows whether this is a mount or an update.
-      const dispatcher: Dispatcher = ReactSharedInternals.H as any;
-      const state: mixed = dispatcher.useStore(store);
+      const state: mixed = readStoreWithUse(store);
       if (
         state !== null &&
         typeof state === 'object' &&
@@ -1205,6 +1205,28 @@ function use<T>(usable: Usable<T>): T {
 
   // eslint-disable-next-line react-internal/safe-string-coercion
   throw new Error('An unsupported type was passed to use(): ' + String(usable));
+}
+
+// use() records the read on the fiber, like a context, so it can be called in
+// a condition or a loop. The commit subscribes it.
+function readStoreWithUse<S>(store: ReactStore<S, mixed>): S {
+  const fiber = currentlyRenderingFiber;
+  const root = getWorkInProgressRoot();
+  if (root === null) {
+    throw new Error(
+      'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
+    );
+  }
+  validateStore(store);
+  const state = readStoreForRender(fiber, store, root);
+  if (!is(state, getCommittedStoreDependencyState(fiber, store))) {
+    // Reading something other than the last commit did is an update, like a
+    // state hook whose state changed.
+    markWorkInProgressReceivedUpdate();
+  }
+  pushStoreReadCheck(fiber, store, root, selectState as any, undefined, state);
+  pushStoreDependency(fiber, root, store, state, state);
+  return state;
 }
 
 function useMemoCache(size: number): Array<mixed> {

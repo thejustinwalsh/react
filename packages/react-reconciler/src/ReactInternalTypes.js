@@ -74,9 +74,24 @@ export type ContextDependency<T> = {
   ...
 };
 
+// A store read with use(), recorded on the fiber that read it, like a context.
+export type StoreDependency = {
+  store: ReactStore<any, any>,
+  root: FiberRoot,
+  // What this render read.
+  state: any,
+  value: any,
+  // The subscribed reader, and how to release it, from the commit that kept
+  // this read.
+  reader: any | null,
+  unsubscribe: (() => void) | null,
+  next: StoreDependency | null,
+};
+
 export type Dependencies = {
   lanes: Lanes,
   firstContext: ContextDependency<mixed> | null,
+  firstStore?: StoreDependency | null, // enableStore
   _debugThenableState?: null | ThenableState, // DEV-only
   ...
 };

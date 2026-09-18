@@ -17,6 +17,7 @@ let assertLog;
 let createStore;
 let useStore;
 let Activity;
+let use;
 let flushSync;
 
 describe('useStore in Activity', () => {
@@ -29,6 +30,7 @@ describe('useStore in Activity', () => {
     createStore = React.createStore;
     useStore = React.useStore;
     Activity = React.Activity;
+    use = React.use;
     flushSync = ReactNoop.flushSync;
 
     const InternalTestUtils = require('internal-test-utils');
@@ -96,6 +98,40 @@ describe('useStore in Activity', () => {
       store.dispatch(2);
       flushSync(() => root.render(<App mode="visible" />));
     });
+    assertLog(['2']);
+    expect(root).toMatchRenderedOutput('2');
+  });
+
+  // @gate enableStore
+  it('shows actions dispatched while hidden when an Activity with a use() reader is revealed', async () => {
+    const store = createStore(0);
+    function Reader() {
+      return <Text text={String(use(store))} />;
+    }
+    function App({mode}) {
+      return (
+        <Activity mode={mode}>
+          <Reader />
+        </Activity>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App mode="visible" />));
+    assertLog(['0']);
+
+    await act(() => root.render(<App mode="hidden" />));
+    assertLog(['0']);
+    // Hidden, so the reader is not subscribed and nothing renders.
+    await act(() => store.dispatch(1));
+    assertLog([]);
+
+    await act(() => root.render(<App mode="visible" />));
+    assertLog(['1']);
+    expect(root).toMatchRenderedOutput('1');
+
+    // Subscribed again once revealed.
+    await act(() => store.dispatch(2));
     assertLog(['2']);
     expect(root).toMatchRenderedOutput('2');
   });

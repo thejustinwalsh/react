@@ -8,7 +8,7 @@
  */
 
 import type {ReactStore, StoreUpdate, Thenable} from 'shared/ReactTypes';
-import type {Fiber, FiberRoot} from './ReactInternalTypes';
+import type {Fiber, FiberRoot, StoreDependency} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
 import type {Transition} from 'react/src/ReactStartTransition';
 
@@ -41,6 +41,7 @@ import {
   scheduleUpdateOnFiber,
 } from './ReactFiberWorkLoop';
 import {startUpdateTimerByLane} from './ReactProfilerTimer';
+import {Update} from './ReactFiberFlags';
 import {ConcurrentMode, NoMode, StrictLegacyMode} from './ReactTypeOfMode';
 
 // An action that not every root with a reader has committed.
@@ -631,6 +632,178 @@ function finishStoreAction<S, A>(
     }
   });
   compactStoreEntries(internals);
+}
+
+// A store read with use() is recorded on the fiber, like a context, so it can
+// be read in a condition or a loop. The commit subscribes it.
+export function pushStoreDependency<S, T>(
+  fiber: Fiber,
+  root: FiberRoot,
+  store: ReactStore<S, mixed>,
+  state: S,
+  value: T,
+): void {
+  const dependency: StoreDependency = {
+    store,
+    root,
+    state,
+    value,
+    reader: null,
+    unsubscribe: null,
+    next: null,
+  };
+  const dependencies = fiber.dependencies;
+  if (dependencies === null) {
+    fiber.dependencies = {
+      lanes: NoLanes,
+      firstContext: null,
+      firstStore: dependency,
+    };
+  } else {
+    const first = dependencies.firstStore;
+    if (first == null) {
+      dependencies.firstStore = dependency;
+    } else {
+      let last: StoreDependency = first;
+      while (last.next !== null) {
+        last = last.next;
+      }
+      last.next = dependency;
+    }
+  }
+  // So the commit visits this fiber and subscribes the read.
+  fiber.flags |= Update;
+}
+
+// What the fiber's last committed render read from this store, if it read it.
+export function getCommittedStoreDependencyState<S>(
+  fiber: Fiber,
+  store: ReactStore<S, mixed>,
+): S | typeof noEagerSelection {
+  const current = fiber.alternate;
+  if (current === null || current.dependencies == null) {
+    return noEagerSelection;
+  }
+  let dependency: StoreDependency | null =
+    current.dependencies.firstStore ?? null;
+  while (dependency !== null) {
+    if (dependency.store === store) {
+      return dependency.state;
+    }
+    dependency = dependency.next;
+  }
+  return noEagerSelection;
+}
+
+function takeStoreDependency(
+  first: StoreDependency | null,
+  store: ReactStore<any, any>,
+): StoreDependency | null {
+  let dependency = first;
+  while (dependency !== null) {
+    if (dependency.store === store && dependency.reader !== null) {
+      return dependency;
+    }
+    dependency = dependency.next;
+  }
+  return null;
+}
+
+// Called when a fiber that read stores with use() commits. A read the fiber
+// kept keeps its subscription; one it dropped is released.
+export function commitStoreDependencies(
+  current: Fiber | null,
+  finishedWork: Fiber,
+): void {
+  const dependencies = finishedWork.dependencies;
+  const previous: StoreDependency | null =
+    current === null || current.dependencies == null
+      ? null
+      : (current.dependencies.firstStore ?? null);
+  let dependency: StoreDependency | null =
+    dependencies == null ? null : (dependencies.firstStore ?? null);
+  if (dependency === null && previous === null) {
+    return;
+  }
+  while (dependency !== null) {
+    const kept = takeStoreDependency(previous, dependency.store);
+    if (kept !== null) {
+      const reader: StoreReader<any, any> = kept.reader as any;
+      reader.fiber = finishedWork;
+      reader.state = dependency.state;
+      reader.value = dependency.value;
+      dependency.reader = reader;
+      dependency.unsubscribe = kept.unsubscribe;
+      kept.reader = null;
+      kept.unsubscribe = null;
+    } else {
+      subscribeStoreDependency(finishedWork, dependency);
+    }
+    dependency = dependency.next;
+  }
+  let dropped: StoreDependency | null = previous;
+  while (dropped !== null) {
+    releaseStoreDependency(dropped);
+    dropped = dropped.next;
+  }
+}
+
+function releaseStoreDependency(dependency: StoreDependency): void {
+  const unsubscribe = dependency.unsubscribe;
+  if (unsubscribe !== null) {
+    dependency.reader = null;
+    dependency.unsubscribe = null;
+    unsubscribe();
+  }
+}
+
+function subscribeStoreDependency(
+  fiber: Fiber,
+  dependency: StoreDependency,
+): void {
+  const reader: StoreReader<any, any> = {
+    store: dependency.store,
+    root: dependency.root,
+    fiber,
+    selector: (state: any) => state,
+    value: dependency.value,
+    state: dependency.state,
+    eagerState: noEagerSelection,
+    eagerValue: noEagerSelection,
+  };
+  dependency.reader = reader;
+  dependency.unsubscribe = subscribeToStoreReader(reader);
+  if (didStoreReaderMissAction(reader)) {
+    // Dispatched between the render and now.
+    const scheduledRoot = enqueueConcurrentRenderForLane(fiber, SyncLane);
+    if (scheduledRoot !== null) {
+      scheduleUpdateOnFiber(scheduledRoot, fiber, SyncLane);
+    }
+  }
+}
+
+// Called when a fiber that read stores with use() is deleted or hidden.
+export function releaseStoreDependencies(fiber: Fiber): void {
+  const dependencies = fiber.dependencies;
+  let dependency: StoreDependency | null =
+    dependencies == null ? null : (dependencies.firstStore ?? null);
+  while (dependency !== null) {
+    releaseStoreDependency(dependency);
+    dependency = dependency.next;
+  }
+}
+
+// Called when a hidden fiber that read stores with use() is revealed.
+export function remountStoreDependencies(fiber: Fiber): void {
+  const dependencies = fiber.dependencies;
+  let dependency: StoreDependency | null =
+    dependencies == null ? null : (dependencies.firstStore ?? null);
+  while (dependency !== null) {
+    if (dependency.reader === null) {
+      subscribeStoreDependency(fiber, dependency);
+    }
+    dependency = dependency.next;
+  }
 }
 
 // Whether a reader shows something other than what its root shows now,

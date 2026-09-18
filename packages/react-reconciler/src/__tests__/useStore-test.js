@@ -561,4 +561,58 @@ describe('useStore', () => {
     assertLog(['second']);
     expect(root).toMatchRenderedOutput('second');
   });
+
+  // @gate enableStore
+  it('reads a store with use() inside a condition', async () => {
+    const store = createStore(0, (n, by) => n + by);
+    let setShow;
+    function App() {
+      const [show, _setShow] = useState(true);
+      setShow = _setShow;
+      return <Text text={'n' + (show ? use(store) : '-')} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['n0']);
+
+    await act(() => store.dispatch(1));
+    assertLog(['n1']);
+
+    // Stops reading the store.
+    await act(() => setShow(false));
+    assertLog(['n-']);
+    await act(() => store.dispatch(1));
+    assertLog([]);
+    expect(root).toMatchRenderedOutput('n-');
+
+    // Reads it again, at the state it has now.
+    await act(() => setShow(true));
+    assertLog(['n2']);
+    expect(root).toMatchRenderedOutput('n2');
+  });
+
+  // @gate enableStore
+  it('reads a store with use() in a loop', async () => {
+    const store = createStore({a: 0, b: 0}, (state, key) => ({
+      ...state,
+      [key]: state[key] + 1,
+    }));
+    function App({keys}) {
+      const state = use(store);
+      return (
+        <>
+          {keys.map(key => (
+            <Text key={key} text={key + state[key]} />
+          ))}
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App keys={['a', 'b']} />));
+    assertLog(['a0', 'b0']);
+
+    await act(() => store.dispatch('a'));
+    assertLog(['a1', 'b0']);
+    expect(root).toMatchRenderedOutput('a1b0');
+  });
 });

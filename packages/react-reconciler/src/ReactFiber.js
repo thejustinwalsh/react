@@ -399,11 +399,13 @@ export function createWorkInProgress(current: Fiber, pendingProps: any): Fiber {
         ? {
             lanes: currentDependencies.lanes,
             firstContext: currentDependencies.firstContext,
+            firstStore: currentDependencies.firstStore,
             _debugThenableState: currentDependencies._debugThenableState,
           }
         : {
             lanes: currentDependencies.lanes,
             firstContext: currentDependencies.firstContext,
+            firstStore: currentDependencies.firstStore,
           };
 
   // These will be overridden during the parent's reconciliation
@@ -508,11 +510,13 @@ export function resetWorkInProgress(
           ? {
               lanes: currentDependencies.lanes,
               firstContext: currentDependencies.firstContext,
+              firstStore: currentDependencies.firstStore,
               _debugThenableState: currentDependencies._debugThenableState,
             }
           : {
               lanes: currentDependencies.lanes,
               firstContext: currentDependencies.firstContext,
+              firstStore: currentDependencies.firstStore,
             };
 
     if (enableProfilerTimer) {

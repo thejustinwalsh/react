@@ -60,6 +60,7 @@ import {
   enableViewTransition,
   enableDefaultTransitionIndicator,
   enableFragmentRefsTextNodes,
+  enableStore,
 } from 'shared/ReactFeatureFlags';
 import {
   FunctionComponent,
@@ -204,6 +205,11 @@ import {
   Passive as HookPassive,
 } from './ReactHookEffectTags';
 import {doesFiberContain} from './ReactFiberTreeReflection';
+import {
+  commitStoreDependencies,
+  releaseStoreDependencies,
+  remountStoreDependencies,
+} from './ReactFiberStore';
 import {isDevToolsPresent, onCommitUnmount} from './ReactFiberDevToolsHook';
 import {releaseCache, retainCache} from './ReactFiberCacheComponent';
 import {clearTransitionsForLanes} from './ReactFiberLane';
@@ -619,6 +625,9 @@ function commitLayoutEffectOnFiber(
         committedLanes,
       );
       if (flags & Update) {
+        if (enableStore) {
+          commitStoreDependencies(current, finishedWork);
+        }
         commitHookLayoutEffects(finishedWork, HookLayout | HookHasEffect);
       }
       break;
@@ -1711,6 +1720,9 @@ function commitDeletionEffectsOnFiber(
           nearestMountedAncestor,
           HookLayout,
         );
+      }
+      if (enableStore) {
+        releaseStoreDependencies(deletedFiber);
       }
       recursivelyTraverseDeletionEffects(
         finishedRoot,
@@ -3104,6 +3116,9 @@ function disappearLayoutEffects(
         finishedWork.return,
         HookLayout,
       );
+      if (enableStore) {
+        releaseStoreDependencies(finishedWork);
+      }
       recursivelyTraverseDisappearLayoutEffects(
         finishedWork,
         layoutEffectTraversalFlags,
@@ -3312,6 +3327,9 @@ function reappearLayoutEffects(
         finishedWork,
         layoutEffectTraversalFlags,
       );
+      if (enableStore) {
+        remountStoreDependencies(finishedWork);
+      }
       // TODO: Check flags & LayoutStatic
       commitHookLayoutEffects(finishedWork, HookLayout);
       break;
