@@ -450,4 +450,41 @@ describe('useStore', () => {
     assertLog(['n1']);
     expect(selector).toHaveBeenCalledTimes(2);
   });
+
+  // @gate enableStore
+  it('throws when a store with no readers is dispatched to while rendering', async () => {
+    const store = createStore(0);
+    class ErrorBoundary extends React.Component {
+      state = {error: null};
+      static getDerivedStateFromError(error) {
+        return {error};
+      }
+      render() {
+        if (this.state.error !== null) {
+          return <Text text={this.state.error.message} />;
+        }
+        return this.props.children;
+      }
+    }
+    function App() {
+      store.dispatch(1);
+      return <Text text="App" />;
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>,
+      ),
+    );
+    assertLog([
+      'Cannot dispatch to a store while rendering. Dispatch from an event ' +
+        'handler or an effect instead.',
+      'Cannot dispatch to a store while rendering. Dispatch from an event ' +
+        'handler or an effect instead.',
+    ]);
+    expect(store.getState()).toBe(0);
+  });
 });
