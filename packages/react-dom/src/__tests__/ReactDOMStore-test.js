@@ -17,7 +17,6 @@ let act;
 let assertLog;
 let Scheduler;
 let createStore;
-let useStore;
 let use;
 
 describe('ReactDOMUseStore', () => {
@@ -30,7 +29,6 @@ describe('ReactDOMUseStore', () => {
     ReactDOMServer = require('react-dom/server');
     Scheduler = require('scheduler');
     createStore = React.createStore;
-    useStore = React.useStore;
     use = React.use;
     const InternalTestUtils = require('internal-test-utils');
     act = InternalTestUtils.act;
@@ -52,9 +50,10 @@ describe('ReactDOMUseStore', () => {
   // @gate enableStore
   it('renders the store’s state on the server', () => {
     const store = createStore({count: 1});
+    const count = store.select(state => state.count);
     store.dispatch({count: 2});
     function App() {
-      return <Text text={'count:' + useStore(store, s => s.count)} />;
+      return <Text text={'count:' + use(count)} />;
     }
     expect(ReactDOMServer.renderToString(<App />)).toBe('count:2');
     assertLog(['count:2']);
@@ -67,10 +66,10 @@ describe('ReactDOMUseStore', () => {
         count: state.count + by,
       }));
     }
-    function App({store}) {
+    function App({count}) {
       return (
         <span>
-          <Text text={'count:' + useStore(store, s => s.count)} />
+          <Text text={'count:' + use(count)} />
         </span>
       );
     }
@@ -78,7 +77,7 @@ describe('ReactDOMUseStore', () => {
     const serverStore = createAppStore({count: 0});
     serverStore.dispatch(5);
     container.innerHTML = ReactDOMServer.renderToString(
-      <App store={serverStore} />,
+      <App count={serverStore.select(state => state.count)} />,
     );
     assertLog(['count:5']);
     const span = container.firstChild;
@@ -86,11 +85,12 @@ describe('ReactDOMUseStore', () => {
     // The client store is created from the state the server rendered, and an
     // action is dispatched before React hydrates.
     const clientStore = createAppStore(serverStore.getState());
+    const clientCount = clientStore.select(state => state.count);
     clientStore.dispatch(1);
 
     const errors = [];
     await act(() =>
-      ReactDOMClient.hydrateRoot(container, <App store={clientStore} />, {
+      ReactDOMClient.hydrateRoot(container, <App count={clientCount} />, {
         onRecoverableError(error) {
           errors.push(error.message);
         },

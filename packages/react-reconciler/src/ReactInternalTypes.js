@@ -60,7 +60,6 @@ export type HookType =
   | 'useDeferredValue'
   | 'useTransition'
   | 'useSyncExternalStore'
-  | 'useStore'
   | 'useId'
   | 'useCacheRefresh'
   | 'useOptimistic'
@@ -453,10 +452,6 @@ export type Dispatcher = {
     getSnapshot: () => T,
     getServerSnapshot?: () => T,
   ): T,
-  useStore: <S, T>(
-    store: ReactStore<S, mixed>,
-    selector?: (state: S, previous: T | void) => T,
-  ) => S | T,
   useId(): string,
   useCacheRefresh: () => <T>(?() => T, ?T) => void,
   useMemoCache: (size: number) => Array<any>,

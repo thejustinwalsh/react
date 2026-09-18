@@ -636,10 +636,7 @@ function useSyncExternalStore<T>(
   return getServerSnapshot();
 }
 
-function useStore<S, T>(
-  store: ReactStore<S, mixed>,
-  selector?: (state: S, previous: T | void) => T,
-): S | T {
+function readStore<S>(store: ReactStore<S, mixed>): S {
   resolveCurrentlyRenderingComponent();
   const maybeStore: mixed = store;
   if (
@@ -648,12 +645,11 @@ function useStore<S, T>(
     maybeStore.$$typeof !== REACT_STORE_TYPE
   ) {
     throw new Error(
-      'Expected the first argument to `useStore` to be a store created by ' +
+      'Expected the argument to `use` to be a store created by ' +
         '`createStore`.',
     );
   }
-  const state = store.getState();
-  return selector === undefined ? state : selector(state, undefined);
+  return store.getState();
 }
 
 function useDeferredValue<T>(value: T, initialValue?: T): T {
@@ -856,19 +852,10 @@ function use<T>(usable: Usable<T>): T {
       const context: ReactContext<T> = usable as any;
       return readContext(context);
     } else if (enableStore && usable.$$typeof === REACT_STORE_TYPE) {
+      // Like a context, this is the value the store holds. A store of a
+      // promise gives you the promise, which use() resolves in its turn.
       const store: ReactStore<T, mixed> = usable as any;
-      const state: mixed = useStore(store);
-      if (
-        state !== null &&
-        typeof state === 'object' &&
-        // $FlowFixMe[method-unbinding]
-        typeof state.then === 'function'
-      ) {
-        // A store of a promise resolves like any other usable.
-        const thenable: Thenable<T> = state as any;
-        return unwrapThenable(thenable);
-      }
-      return state as any;
+      return readStore(store);
     }
   }
 
@@ -941,8 +928,7 @@ export const HooksDispatcher: Dispatcher = supportsClientAPIs
       useId,
       // Subscriptions are not setup in a server environment.
       useSyncExternalStore,
-      useStore,
-      useOptimistic,
+          useOptimistic,
       useActionState,
       useFormState: useActionState,
       useHostTransitionStatus,
@@ -967,8 +953,7 @@ export const HooksDispatcher: Dispatcher = supportsClientAPIs
       useDeferredValue: clientHookNotSupported,
       useTransition: clientHookNotSupported,
       useSyncExternalStore: clientHookNotSupported,
-      useStore: clientHookNotSupported,
-      useId,
+          useId,
       useHostTransitionStatus,
       useFormState: useActionState,
       useActionState,

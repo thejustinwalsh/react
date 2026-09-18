@@ -47,11 +47,10 @@ export function didStatefulHookChange(
   prev: HooksNode,
   next: HooksNode,
 ): boolean {
-  // Detect the shape of useState() / useReducer() / useTransition() / useSyncExternalStore() / useStore() / useActionState()
+  // Detect the shape of useState() / useReducer() / useTransition() / useSyncExternalStore() / useActionState()
   const isStatefulHook =
     prev.isStateEditable === true ||
     prev.name === 'SyncExternalStore' ||
-    prev.name === 'Store' ||
     prev.name === 'Transition' ||
     prev.name === 'ActionState' ||
     prev.name === 'FormState';

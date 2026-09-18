@@ -4462,6 +4462,27 @@ describe('ReactFlight', () => {
     expect(ReactNoop).toMatchRenderedOutput(<span>6</span>);
   });
 
+  // @gate enableStore
+  it('reads a store with use() in a server component', async () => {
+    function Totals({rows}) {
+      const store = ReactServer.createStore(0, (total, row) => total + row);
+      const doubled = store.select(total => total * 2);
+      for (let i = 0; i < rows.length; i++) {
+        store.dispatch(rows[i]);
+      }
+      return (
+        <span>
+          {ReactServer.use(store)}/{ReactServer.use(doubled)}
+        </span>
+      );
+    }
+    const transport = ReactNoopFlightServer.render(<Totals rows={[1, 2, 3]} />);
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+    expect(ReactNoop).toMatchRenderedOutput(<span>6/12</span>);
+  });
+
   it('can use a JSX element exported as a client reference in multiple server components', async () => {
     const ClientReference = clientReference(React.createElement('span'));
 

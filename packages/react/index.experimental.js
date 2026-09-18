@@ -54,7 +54,6 @@ export {
   useReducer,
   useRef,
   useState,
-  useStore,
   useSyncExternalStore,
   useTransition,
   useActionState,

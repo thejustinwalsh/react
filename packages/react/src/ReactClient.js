@@ -48,7 +48,6 @@ import {
   useLayoutEffect,
   useMemo,
   useSyncExternalStore,
-  useStore,
   useReducer,
   useRef,
   useState,
@@ -134,7 +133,6 @@ export {
   REACT_OPTIMISTIC_KEY as optimisticKey,
   // enableStore
   createStore,
-  useStore,
   // DEV-only
   useId,
   act,

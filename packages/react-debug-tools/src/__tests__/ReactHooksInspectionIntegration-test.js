@@ -2394,12 +2394,13 @@ describe('ReactHooksInspectionIntegration', () => {
   });
 
   // @gate enableStore
-  it('should support composite useStore hook', async () => {
+  it('should support reading a store with use()', async () => {
     const store = React.createStore({count: 1});
+    const count = store.select(state => state.count);
     function Foo() {
-      const count = React.useStore(store, state => state.count);
+      const value = React.use(count);
       React.useMemo(() => 'memo', []);
-      return count;
+      return value;
     }
 
     let renderer;
@@ -2411,7 +2412,7 @@ describe('ReactHooksInspectionIntegration', () => {
     const childFiber = renderer.root.findByType(Foo)._currentFiber();
     const tree = ReactDebugTools.inspectHooksOfFiber(childFiber);
     expect(tree.map(hook => [hook.id, hook.name, hook.value])).toEqual([
-      [0, 'Store', 1],
+      [0, 'Use', 1],
       [1, 'Memo', 'memo'],
     ]);
   });

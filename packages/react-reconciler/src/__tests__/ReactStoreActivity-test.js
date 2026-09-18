@@ -15,12 +15,11 @@ let Scheduler;
 let act;
 let assertLog;
 let createStore;
-let useStore;
 let Activity;
 let use;
 let flushSync;
 
-describe('useStore in Activity', () => {
+describe('a store in Activity', () => {
   beforeEach(() => {
     jest.resetModules();
 
@@ -28,7 +27,7 @@ describe('useStore in Activity', () => {
     ReactNoop = require('react-noop-renderer');
     Scheduler = require('scheduler');
     createStore = React.createStore;
-    useStore = React.useStore;
+    use = React.use;
     Activity = React.Activity;
     use = React.use;
     flushSync = ReactNoop.flushSync;
@@ -47,7 +46,7 @@ describe('useStore in Activity', () => {
   it('shows actions dispatched while hidden when an Activity is revealed', async () => {
     const store = createStore(0);
     function Reader() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     function App({mode}) {
       return (
@@ -75,7 +74,7 @@ describe('useStore in Activity', () => {
   it('shows the latest state when an Activity is revealed with updates still queued', async () => {
     const store = createStore(0);
     function Reader() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     function App({mode}) {
       return (

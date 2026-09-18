@@ -49,7 +49,11 @@ function createSelection<S, T>(
     select<U>(next: (state: T, previous: U | void) => U): ReactStore<U, empty> {
       return createSelection(selection, next);
     },
-    _initialState: select(parent._initialState, undefined),
+    // A selection hydrates from the state its source was created with, so it
+    // does not keep one of its own.
+    get _initialState(): T {
+      return select(parent._initialState, undefined);
+    },
     _reducer: (state: T, action: empty) => state,
     _parent: parent,
     _select: select,

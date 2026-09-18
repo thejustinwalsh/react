@@ -16,13 +16,13 @@ let Scheduler;
 let act;
 let assertLog;
 let createStore;
-let useStore;
+let use;
 let useState;
 let startTransition;
 let Suspense;
 let textCache;
 
-describe('useStore in multiple renderers', () => {
+describe('a store in multiple renderers', () => {
   afterEach(() => {
     global.__unmockReact();
     jest.mock('scheduler', () => jest.requireActual('scheduler/unstable_mock'));
@@ -48,7 +48,7 @@ describe('useStore in multiple renderers', () => {
     ReactNoopSecondary = require('react-noop-renderer');
 
     createStore = React.createStore;
-    useStore = React.useStore;
+    use = React.use;
     useState = React.useState;
     startTransition = React.startTransition;
     Suspense = React.Suspense;
@@ -102,7 +102,7 @@ describe('useStore in multiple renderers', () => {
   it('hands a Transition to a renderer with no readers while another renderer has one', async () => {
     const store = createStore(0);
     function Reader({name}) {
-      return <Text text={name + useStore(store)} />;
+      return <Text text={name + use(store)} />;
     }
     let setPage;
     function Page() {
@@ -156,11 +156,11 @@ describe('useStore in multiple renderers', () => {
   it('rejects a dispatch while rendering before any renderer receives it', async () => {
     const store = createStore(0);
     function Reader() {
-      return <Text text={'a' + useStore(store)} />;
+      return <Text text={'a' + use(store)} />;
     }
     let dispatchWhileRendering = false;
     function Dispatches() {
-      const n = useStore(store);
+      const n = use(store);
       if (dispatchWhileRendering) {
         store.dispatch(1);
       }

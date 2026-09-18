@@ -97,10 +97,6 @@ function getPrimitiveStackCache(): Map<string, Array<any>> {
         () => null,
         () => null,
       );
-      Dispatcher.useStore<null, null>({
-        $$typeof: REACT_STORE_TYPE,
-        getState: () => null,
-      } as any);
       Dispatcher.useDeferredValue(null);
       Dispatcher.useMemo(() => null);
       Dispatcher.useOptimistic(null, (s: mixed, a: mixed) => s);
@@ -127,6 +123,10 @@ function getPrimitiveStackCache(): Map<string, Array<any>> {
           status: 'fulfilled',
           value: null,
         });
+        Dispatcher.use({
+          $$typeof: REACT_STORE_TYPE,
+          getState: () => null,
+        } as any);
         try {
           Dispatcher.use({
             then() {},
@@ -269,6 +269,20 @@ function use<T>(usable: Usable<T>): T {
       hookLog.push({
         displayName: context.displayName || 'Context',
         primitive: 'Context (use)',
+        stackError: new Error(),
+        value,
+        debugInfo: null,
+        dispatcherHookName: 'Use',
+      });
+
+      return value;
+    } else if (usable.$$typeof === REACT_STORE_TYPE) {
+      const store: ReactStore<T, mixed> = usable as any;
+      const value = store.getState();
+
+      hookLog.push({
+        displayName: null,
+        primitive: 'Store (use)',
         stackError: new Error(),
         value,
         debugInfo: null,
@@ -498,33 +512,6 @@ function useSyncExternalStore<T>(
     value,
     debugInfo: null,
     dispatcherHookName: 'SyncExternalStore',
-  });
-  return value;
-}
-
-function useStore<S, T>(
-  store: ReactStore<S, mixed>,
-  selector?: (state: S, previous: T | void) => T,
-): S | T {
-  // useStore() composes multiple hooks internally.
-  // Advance the current hook index the same number of times
-  // so that subsequent hooks have the right memoized state.
-  const hook = nextHook(); // Store
-  nextHook(); // LayoutEffect
-  let value;
-  if (hook !== null) {
-    value = hook.memoizedState;
-  } else {
-    const state = store.getState();
-    value = selector === undefined ? state : selector(state, undefined);
-  }
-  hookLog.push({
-    displayName: null,
-    primitive: 'Store',
-    stackError: new Error(),
-    value,
-    debugInfo: null,
-    dispatcherHookName: 'Store',
   });
   return value;
 }
@@ -826,7 +813,6 @@ const Dispatcher: DispatcherType = {
   useDeferredValue,
   useTransition,
   useSyncExternalStore,
-  useStore,
   useId,
   useHostTransitionStatus,
   useFormState,

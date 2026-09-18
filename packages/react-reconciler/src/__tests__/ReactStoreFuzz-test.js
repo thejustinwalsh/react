@@ -129,14 +129,19 @@ describe('ReactStoreFuzz', () => {
 
     function createStoreApp() {
       const store = React.createStore(initialState, reducer);
+      const selections = {
+        page: store.select(state => state.page),
+        count: store.select(state => state.count),
+        filter: store.select(state => state.filter),
+      };
       function StorePage() {
-        return <Page page={React.useStore(store, state => state.page)} />;
+        return <Page page={React.use(selections.page)} />;
       }
       function StoreCount() {
-        return <Count count={React.useStore(store, state => state.count)} />;
+        return <Count count={React.use(selections.count)} />;
       }
       function StoreFilter() {
-        return <Filter filter={React.useStore(store, state => state.filter)} />;
+        return <Filter filter={React.use(selections.filter)} />;
       }
       const app = {dispatch: store.dispatch, setExtraMounted: [], App: null};
       app.App = function StoreApp({index}) {

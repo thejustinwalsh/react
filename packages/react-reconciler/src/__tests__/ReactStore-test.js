@@ -15,14 +15,13 @@ let Scheduler;
 let act;
 let assertLog;
 let createStore;
-let useStore;
 let useState;
 let startTransition;
 let use;
 let Suspense;
 let promises;
 
-describe('useStore', () => {
+describe('createStore and use', () => {
   beforeEach(() => {
     jest.resetModules();
     global.reportError = error => {
@@ -33,7 +32,7 @@ describe('useStore', () => {
     ReactNoop = require('react-noop-renderer');
     Scheduler = require('scheduler');
     createStore = React.createStore;
-    useStore = React.useStore;
+    use = React.use;
     useState = React.useState;
     startTransition = React.startTransition;
     use = React.use;
@@ -67,7 +66,7 @@ describe('useStore', () => {
   it('reads the state of the store', async () => {
     const store = createStore(1);
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -80,7 +79,7 @@ describe('useStore', () => {
   it('dispatches a value or an updater without a reducer', async () => {
     const store = createStore(1);
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -101,7 +100,7 @@ describe('useStore', () => {
       action.type === 'add' ? n + action.by : n,
     );
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -116,11 +115,13 @@ describe('useStore', () => {
   // @gate enableStore
   it('does not render when the selected state did not change', async () => {
     const store = createStore({a: 0, b: 0});
+    const a = store.select(state => state.a);
+    const b = store.select(state => state.b);
     function A() {
-      return <Text text={'a' + useStore(store, s => s.a)} />;
+      return <Text text={'a' + use(a)} />;
     }
     function B() {
-      return <Text text={'b' + useStore(store, s => s.b)} />;
+      return <Text text={'b' + use(b)} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -141,17 +142,18 @@ describe('useStore', () => {
   // @gate enableStore
   it('passes the previous selection to the selector', async () => {
     const store = createStore({items: [1, 2], other: 0});
+    const items = store.select((state, previous) =>
+      previous !== undefined &&
+      previous.length === state.items.length &&
+      previous.every((item, i) => item === state.items[i])
+        ? previous
+        : state.items.slice(),
+    );
     const selections = [];
     function App() {
-      const items = useStore(store, (state, previous) =>
-        previous !== undefined &&
-        previous.length === state.items.length &&
-        previous.every((item, i) => item === state.items[i])
-          ? previous
-          : state.items.slice(),
-      );
-      selections.push(items);
-      return <Text text={items.join(',')} />;
+      const selected = use(items);
+      selections.push(selected);
+      return <Text text={selected.join(',')} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -167,18 +169,20 @@ describe('useStore', () => {
 
   // @gate enableStore
   it('starts a fresh selection when the store changes', async () => {
+    const previousValues = [];
+    const track = (state, previous) => {
+      previousValues.push(previous);
+      return state;
+    };
     const first = createStore(1);
     const second = createStore(2);
-    const previousValues = [];
-    let setStore;
+    const firstSelection = first.select(track);
+    const secondSelection = second.select(track);
+    let setSelection;
     function App() {
-      const [store, _setStore] = useState(first);
-      setStore = _setStore;
-      const value = useStore(store, (state, previous) => {
-        previousValues.push(previous);
-        return state;
-      });
-      return <Text text={String(value)} />;
+      const [selection, _setSelection] = useState(firstSelection);
+      setSelection = _setSelection;
+      return <Text text={String(use(selection))} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -186,7 +190,7 @@ describe('useStore', () => {
     assertLog(['1']);
     previousValues.length = 0;
 
-    await act(() => setStore(second));
+    await act(() => setSelection(secondSelection));
     assertLog(['2']);
     expect(previousValues[0]).toBe(undefined);
 
@@ -200,6 +204,7 @@ describe('useStore', () => {
   // @gate enableStore
   it('judges a dispatch from a layout effect with the selector that rendered', async () => {
     const store = createStore({a: 0, b: 0});
+    const fields = {a: store.select(s => s.a), b: store.select(s => s.b)};
     let setKey;
     function Dispatcher({isArmed}) {
       React.useLayoutEffect(() => {
@@ -210,7 +215,7 @@ describe('useStore', () => {
       return null;
     }
     function Reader({field}) {
-      const value = useStore(store, s => s[field]);
+      const value = use(fields[field]);
       return <Text text={field + '=' + value} />;
     }
     function App() {
@@ -237,13 +242,14 @@ describe('useStore', () => {
   it('does not render a reader that switched stores for a change it does not select', async () => {
     const first = createStore({a: 0, b: 0});
     const second = createStore({a: 0, b: 0});
-    function Reader({store}) {
-      return <Text text={'a=' + useStore(store, s => s.a)} />;
+    const selections = [first.select(s => s.a), second.select(s => s.a)];
+    function Reader({which}) {
+      return <Text text={'a=' + use(selections[which])} />;
     }
     const root = ReactNoop.createRoot();
-    await act(() => root.render(<Reader store={first} />));
+    await act(() => root.render(<Reader which={0} />));
     assertLog(['a=0']);
-    await act(() => root.render(<Reader store={second} />));
+    await act(() => root.render(<Reader which={1} />));
     assertLog(['a=0']);
 
     await act(() => second.dispatch(s => ({...s, b: 1})));
@@ -255,9 +261,10 @@ describe('useStore', () => {
   // @gate enableStore
   it('does not commit a reader for a change it does not select', async () => {
     const store = createStore({unread: 0, theme: 'dark'});
+    const unreadCount = store.select(s => s.unread);
     let commits = 0;
     function Unread() {
-      const unread = useStore(store, s => s.unread);
+      const unread = use(unreadCount);
       React.useEffect(() => {
         commits++;
       });
@@ -295,13 +302,14 @@ describe('useStore', () => {
         );
       }
     }
+    const checked = store.select(n => {
+      if (n > 0) {
+        throw new Error('Oops');
+      }
+      return n;
+    });
     function App() {
-      const value = useStore(store, n => {
-        if (n > 0) {
-          throw new Error('Oops');
-        }
-        return n;
-      });
+      const value = use(checked);
       return <Text text={String(value)} />;
     }
 
@@ -336,23 +344,22 @@ describe('useStore', () => {
 
   // @gate enableStore
   it('does not pass the previous store’s selection after the store changes', async () => {
+    const keepOne = (state, previous) => (previous === 1 ? previous : state);
     const first = createStore(1);
     const second = createStore(undefined);
-    let setStore;
+    const selections = [first.select(keepOne), second.select(keepOne)];
+    let setSelection;
     function App() {
-      const [store, _setStore] = useState(first);
-      setStore = _setStore;
-      const value = useStore(store, (state, previous) =>
-        previous === 1 ? previous : state,
-      );
-      return <Text text={String(value)} />;
+      const [which, _setSelection] = useState(0);
+      setSelection = _setSelection;
+      return <Text text={String(use(selections[which]))} />;
     }
 
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
     assertLog(['1']);
 
-    await act(() => setStore(second));
+    await act(() => setSelection(1));
     assertLog(['undefined']);
     await act(() => second.dispatch(2));
     assertLog(['2']);
@@ -376,7 +383,7 @@ describe('useStore', () => {
     expect(error.message).toBe('Oops');
 
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
@@ -391,7 +398,7 @@ describe('useStore', () => {
       return n + by;
     };
     function Reader({store}) {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
 
     const strictStore = createStore(0, reducer);
@@ -429,7 +436,7 @@ describe('useStore', () => {
   it('throws when dispatching inside a gesture Transition', async () => {
     const store = createStore(0);
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
@@ -457,8 +464,9 @@ describe('useStore', () => {
   it('reuses the selection it made when the action was dispatched', async () => {
     const store = createStore({count: 0}, state => ({count: state.count + 1}));
     const selector = jest.fn(state => state.count);
+    const count = store.select(selector);
     function App() {
-      return <Text text={'n' + useStore(store, selector)} />;
+      return <Text text={'n' + use(count)} />;
     }
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
@@ -527,10 +535,11 @@ describe('useStore', () => {
   });
 
   // @gate enableStore
-  it('suspends on a store whose state is a promise, and resolves it with use()', async () => {
+  it('gives the promise a store holds to use(), which resolves it', async () => {
     const store = createStore(getPromise('first'));
     function App() {
-      return <Text text={use(store)} />;
+      // use(store) is the promise the store holds, like a context of one.
+      return <Text text={use(use(store))} />;
     }
     const root = ReactNoop.createRoot();
     await act(() =>

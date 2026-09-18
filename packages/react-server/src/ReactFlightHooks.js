@@ -9,12 +9,14 @@
 
 import type {Dispatcher} from 'react-reconciler/src/ReactInternalTypes';
 import type {Request} from './ReactFlightServer';
-import type {Thenable, Usable, ReactComponentInfo} from 'shared/ReactTypes';
+import type {ReactStore, Thenable, Usable, ReactComponentInfo} from 'shared/ReactTypes';
 import type {ThenableState} from './ReactFlightThenable';
 import {
   REACT_MEMO_CACHE_SENTINEL,
   REACT_CONTEXT_TYPE,
+  REACT_STORE_TYPE,
 } from 'shared/ReactSymbols';
+import {enableStore} from 'shared/ReactFeatureFlags';
 import {createThenableState, trackUsedThenable} from './ReactFlightThenable';
 import {isClientReference} from './ReactFlightServerConfig';
 
@@ -85,7 +87,6 @@ export const HooksDispatcher: Dispatcher = {
   useDeferredValue: unsupportedHook as any,
   useTransition: unsupportedHook as any,
   useSyncExternalStore: unsupportedHook as any,
-  useStore: unsupportedHook as any,
   useId,
   useHostTransitionStatus: unsupportedHook as any,
   useFormState: unsupportedHook as any,
@@ -148,6 +149,11 @@ function use<T>(usable: Usable<T>): T {
       return trackUsedThenable(thenableState, thenable, index);
     } else if (usable.$$typeof === REACT_CONTEXT_TYPE) {
       unsupportedContext();
+    } else if (enableStore && usable.$$typeof === REACT_STORE_TYPE) {
+      // A Server Component renders once, so this is the state the store holds
+      // now. Nothing subscribes to it.
+      const store: ReactStore<T, mixed> = usable as any;
+      return store.getState();
     }
   }
 

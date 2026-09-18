@@ -17,7 +17,7 @@ let assertLog;
 let waitForAll;
 let waitForPaint;
 let createStore;
-let useStore;
+let use;
 let useState;
 let startTransition;
 let Suspense;
@@ -27,7 +27,7 @@ let microtaskCount;
 
 const originalQueueMicrotask = global.queueMicrotask;
 
-describe('useStore in a Transition', () => {
+describe('a store in a Transition', () => {
   afterEach(() => {
     global.queueMicrotask = originalQueueMicrotask;
   });
@@ -47,7 +47,7 @@ describe('useStore in a Transition', () => {
     ReactNoop = require('react-noop-renderer');
     Scheduler = require('scheduler');
     createStore = React.createStore;
-    useStore = React.useStore;
+    use = React.use;
     useState = React.useState;
     startTransition = React.startTransition;
     Suspense = React.Suspense;
@@ -108,7 +108,7 @@ describe('useStore in a Transition', () => {
   it('keeps the previous state on screen while a Transition suspends', async () => {
     const store = createStore('A');
     function App() {
-      const text = useStore(store);
+      const text = use(store);
       return text === 'A' ? <Text text="A" /> : <AsyncText text={text} />;
     }
 
@@ -135,12 +135,18 @@ describe('useStore in a Transition', () => {
   // @gate enableStore
   it('rebases a blocking update over a pending Transition', async () => {
     const store = createStore({page: 'home', count: 0});
+    const page = store.select(s => s.page);
+    const count = store.select(s => s.count);
     function Page() {
-      const page = useStore(store, s => s.page);
-      return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
+      const current = use(page);
+      return current === 'home' ? (
+        <Text text="home" />
+      ) : (
+        <AsyncText text={current} />
+      );
     }
     function Count() {
-      return <Text text={'count:' + useStore(store, s => s.count)} />;
+      return <Text text={'count:' + use(count)} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -178,7 +184,7 @@ describe('useStore in a Transition', () => {
     const store = createStore('A');
     let showSecond;
     function Reader({label}) {
-      const text = useStore(store);
+      const text = use(store);
       return text === 'A' ? (
         <Text text={label + text} />
       ) : (
@@ -221,11 +227,12 @@ describe('useStore in a Transition', () => {
   // @gate enableStore
   it('reads the latest state when the selector changes after a skipped update', async () => {
     const store = createStore({a: 0, b: 0});
+    const slices = {a: store.select(s => s.a), b: store.select(s => s.b)};
     let setKey;
     function App() {
       const [key, _setKey] = useState('a');
       setKey = _setKey;
-      return <Text text={key + useStore(store, s => s[key])} />;
+      return <Text text={key + use(slices[key])} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -244,9 +251,10 @@ describe('useStore in a Transition', () => {
   // @gate enableStore
   it('reads the state on screen when a selector changes during a pending Transition', async () => {
     const store = createStore({a: 0, b: 0});
+    const slices = {a: store.select(s => s.a), b: store.select(s => s.b)};
     let setKey;
     function Full() {
-      const state = useStore(store);
+      const state = use(store);
       if (state.a === 10) {
         readText('a10');
       }
@@ -255,7 +263,7 @@ describe('useStore in a Transition', () => {
     function Slice() {
       const [key, _setKey] = useState('b');
       setKey = _setKey;
-      return <Text text={'slice:' + key + useStore(store, s => s[key])} />;
+      return <Text text={'slice:' + key + use(slices[key])} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -338,7 +346,7 @@ describe('useStore in a Transition', () => {
     });
     const withStore = await renderTwoTransitions((reducer, initial) => {
       const store = createStore(initial, reducer);
-      return [() => useStore(store), store.dispatch];
+      return [() => use(store), store.dispatch];
     });
     expect(withStore).toEqual(withReducer);
   });
@@ -347,7 +355,7 @@ describe('useStore in a Transition', () => {
   it('renders a Transition synchronously in a legacy root', async () => {
     const store = createStore(0);
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
 
     const root = ReactNoop.createLegacyRoot();
@@ -375,7 +383,8 @@ describe('useStore in a Transition', () => {
     function App() {
       const [count, _setCount] = useState(0);
       setCount = _setCount;
-      const promise = useStore(store);
+      // The store holds a promise, which a boundary below resolves.
+      const promise = use(store);
       return (
         <>
           <Text text={'clicked:' + count} />
@@ -409,11 +418,11 @@ describe('useStore in a Transition', () => {
   it('mounts a reader during a pending Transition at what the tree shows, and joins it', async () => {
     const store = createStore(1);
     function Gated() {
-      const n = useStore(store);
+      const n = use(store);
       return n === 2 ? <AsyncText text="2" /> : <Text text={String(n)} />;
     }
     function Late() {
-      return <Text text={'late:' + useStore(store)} />;
+      return <Text text={'late:' + use(store)} />;
     }
     let setIsShown;
     function App() {
@@ -449,7 +458,7 @@ describe('useStore in a Transition', () => {
   it('applies an action that only changes the state on screen', async () => {
     const store = createStore('A');
     function App() {
-      const text = useStore(store);
+      const text = use(store);
       return text === 'B' ? <AsyncText text="B" /> : <Text text={text} />;
     }
 
@@ -475,17 +484,17 @@ describe('useStore in a Transition', () => {
   // @gate enableStore
   it('does not select the pending state during a blocking render', async () => {
     const store = createStore(0);
+    const checked = store.select(n => {
+      if (n === 1) {
+        readText('one');
+      }
+      return n;
+    });
     let setLabel;
     function App() {
       const [label, _setLabel] = useState('a');
       setLabel = _setLabel;
-      const value = useStore(store, n => {
-        if (n === 1) {
-          readText('one');
-        }
-        return n;
-      });
-      return <Text text={label + value} />;
+      return <Text text={label + use(checked)} />;
     }
 
     const root = ReactNoop.createRoot();
@@ -517,7 +526,7 @@ describe('useStore in a Transition', () => {
     }
     let showReader;
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     function Other() {
       const [show, setShow] = useState(false);
@@ -563,7 +572,7 @@ describe('useStore in a Transition', () => {
   it('shows a Transition dispatched before its scope throws', async () => {
     const store = createStore(0);
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
@@ -589,7 +598,7 @@ describe('useStore in a Transition', () => {
     }
     const store = createStore(0);
     function StoreReader() {
-      return <Text text={'store' + useStore(store)} />;
+      return <Text text={'store' + use(store)} />;
     }
     const root = ReactNoop.createRoot();
     root.render(
@@ -630,7 +639,7 @@ describe('useStore in a Transition', () => {
     }
     let showReader;
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     function Other() {
       const [show, setShow] = useState(false);
@@ -668,7 +677,7 @@ describe('useStore in a Transition', () => {
       action === 'double' ? n * 2 : n + 1,
     );
     function App() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     const root = ReactNoop.createRoot();
     await act(() => root.render(<App />));
@@ -707,7 +716,7 @@ describe('useStore in a Transition', () => {
     }
     let showReader;
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     function Other() {
       const [show, setShow] = useState(false);
@@ -776,7 +785,7 @@ describe('useStore in a Transition', () => {
     }
     let showReader;
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     function Other() {
       const [show, setShow] = useState(false);
@@ -835,7 +844,7 @@ describe('useStore in a Transition', () => {
     }
     let showReader;
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     function Other() {
       const [show, setShow] = useState(false);
@@ -884,7 +893,7 @@ describe('useStore in a Transition', () => {
     }
     let showReader;
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     function Other() {
       const [show, setShow] = useState(false);
@@ -925,7 +934,7 @@ describe('useStore in a Transition', () => {
   it('does not show a fallback for a Transition dispatched right after a reader commits', async () => {
     const store = createStore(0);
     function Reader() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 10) {
         readText('data');
       }

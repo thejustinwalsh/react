@@ -765,6 +765,32 @@ export function getCommittedStoreDependencyValue<T>(
   return noEagerSelection;
 }
 
+// What the selection returned when an action was dispatched, if this render
+// reads the same state. Selecting again would return the same thing.
+export function getEagerStoreDependencySelection<S, T>(
+  fiber: Fiber,
+  selection: ReactStore<T, mixed>,
+  sourceState: S,
+  previous: T | void,
+): T | typeof noEagerSelection {
+  const current = fiber.alternate;
+  if (current === null || current.dependencies == null) {
+    return noEagerSelection;
+  }
+  let dependency: StoreDependency | null =
+    current.dependencies.firstStore ?? null;
+  while (dependency !== null) {
+    if (dependency.store === selection) {
+      const reader = dependency.reader;
+      return reader === null
+        ? noEagerSelection
+        : getEagerStoreSelection(reader, sourceState, reader.selector, previous);
+    }
+    dependency = dependency.next;
+  }
+  return noEagerSelection;
+}
+
 function takeStoreDependency(
   first: StoreDependency | null,
   store: ReactStore<any, any>,

@@ -15,13 +15,13 @@ let Scheduler;
 let act;
 let assertLog;
 let createStore;
-let useStore;
+let use;
 let useState;
 let startTransition;
 let Suspense;
 let textCache;
 
-describe('useStore in multiple roots', () => {
+describe('a store in multiple roots', () => {
   beforeEach(() => {
     jest.resetModules();
 
@@ -29,7 +29,7 @@ describe('useStore in multiple roots', () => {
     ReactNoop = require('react-noop-renderer');
     Scheduler = require('scheduler');
     createStore = React.createStore;
-    useStore = React.useStore;
+    use = React.use;
     useState = React.useState;
     startTransition = React.startTransition;
     Suspense = React.Suspense;
@@ -87,10 +87,10 @@ describe('useStore in multiple roots', () => {
   it('keeps each root on its own state while one waits on a Transition', async () => {
     const store = createStore(0, (n, by) => n + by);
     function Fast() {
-      return <Text text={String(useStore(store))} />;
+      return <Text text={String(use(store))} />;
     }
     function Stalls() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 10) {
         readText('data');
       }
@@ -132,14 +132,14 @@ describe('useStore in multiple roots', () => {
   it('shows a Transition in a root that mounts with no work pending for it', async () => {
     const store = createStore(0, (n, by) => n + by);
     function Stalls() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 10) {
         readText('data');
       }
       return <Text text={'b' + n} />;
     }
     function Late() {
-      return <Text text={'c' + useStore(store)} />;
+      return <Text text={'c' + use(store)} />;
     }
 
     const rootB = ReactNoop.createRoot();
@@ -171,7 +171,7 @@ describe('useStore in multiple roots', () => {
   it('mounts a reader in the same Transition as a dispatch in another root', async () => {
     const store = createStore(0);
     function Stalls() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 10) {
         readText('data');
       }
@@ -179,7 +179,7 @@ describe('useStore in multiple roots', () => {
     }
     let showReader;
     function NewReader() {
-      return <Text text={'b' + useStore(store)} />;
+      return <Text text={'b' + use(store)} />;
     }
     function App() {
       const [show, setShow] = useState(false);
@@ -215,14 +215,14 @@ describe('useStore in multiple roots', () => {
   it('mounts a reader at the state its root shows after it committed a Transition another root has not', async () => {
     const store = createStore(0);
     function Stalls() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 10) {
         readText('data');
       }
       return <Text text={'a' + n} />;
     }
     function StallsLater() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 20) {
         readText('more');
       }
@@ -230,7 +230,7 @@ describe('useStore in multiple roots', () => {
     }
     let showReader;
     function NewReader() {
-      return <Text text={'new' + useStore(store)} />;
+      return <Text text={'new' + use(store)} />;
     }
     function App() {
       const [show, setShow] = useState(false);
@@ -279,7 +279,7 @@ describe('useStore in multiple roots', () => {
       return page === 'home' ? <Text text="home" /> : <AsyncText text={page} />;
     }
     function Reader() {
-      return <Text text={'n' + useStore(store)} />;
+      return <Text text={'n' + use(store)} />;
     }
     const rootA = ReactNoop.createRoot();
     await act(() =>
@@ -311,7 +311,7 @@ describe('useStore in multiple roots', () => {
   it('shows an async Action in a root that mounted during it once it finishes', async () => {
     const store = createStore(0);
     function Reader({name}) {
-      return <Text text={name + useStore(store)} />;
+      return <Text text={name + use(store)} />;
     }
 
     const rootA = ReactNoop.createRoot();
@@ -347,10 +347,10 @@ describe('useStore in multiple roots', () => {
   it('does not show a fallback in a root that catches up when an async Action finishes', async () => {
     const store = createStore(0);
     function Reader({name}) {
-      return <Text text={name + useStore(store)} />;
+      return <Text text={name + use(store)} />;
     }
     function Stalls() {
-      const n = useStore(store);
+      const n = use(store);
       if (n >= 1) {
         readText('data');
       }

@@ -165,16 +165,13 @@ import {isCurrentTreeHidden} from './ReactFiberHiddenContext';
 import {requestCurrentTransition} from './ReactFiberTransition';
 
 import {callComponentInDEV} from './ReactFiberCallUserSpace';
-import type {StoreReader} from './ReactFiberStore';
 import {
   readStoreState,
   getSkippedStoreLanes,
-  subscribeToStoreReader,
-  didStoreReaderMissAction,
-  getEagerStoreSelection,
   noEagerSelection,
   pushStoreDependency,
   getCommittedStoreDependencyValue,
+  getEagerStoreDependencySelection,
   getStoreSource,
   readStoreSelection,
 } from './ReactFiberStore';
@@ -1189,19 +1186,10 @@ function use<T>(usable: Usable<T>): T {
       const context: ReactContext<T> = usable as any;
       return readContext(context);
     } else if (enableStore && usable.$$typeof === REACT_STORE_TYPE) {
+      // Like a context, this is the value the store holds. A store of a
+      // promise gives you the promise, which use() resolves in its turn.
       const store: ReactStore<T, mixed> = usable as any;
-      const state: mixed = readStoreWithUse(store);
-      if (
-        state !== null &&
-        typeof state === 'object' &&
-        // $FlowFixMe[method-unbinding]
-        typeof state.then === 'function'
-      ) {
-        // A store of a promise resolves like any other usable.
-        const thenable: Thenable<T> = state as any;
-        return useThenable(thenable);
-      }
-      return state as any;
+      return readStoreWithUse(store);
     }
   }
 
@@ -1223,12 +1211,18 @@ function readStoreWithUse<T>(store: ReactStore<T, mixed>): T {
   const source = getStoreSource(store);
   const sourceState = readStoreForRender(fiber, source, root);
   const previous = getCommittedStoreDependencyValue(fiber, store);
-  const value = readStoreSelection(
+  const previousValue: T | void =
+    previous === noEagerSelection ? undefined : (previous as any);
+  const eagerValue = getEagerStoreDependencySelection(
+    fiber,
     store,
     sourceState,
-    root,
-    previous === noEagerSelection ? undefined : (previous as any),
+    previousValue,
   );
+  const value =
+    eagerValue !== noEagerSelection
+      ? (eagerValue as any)
+      : readStoreSelection(store, sourceState, root, previousValue);
   if (!is(value, previous)) {
     // Reading something other than the last commit did is an update, like a
     // state hook whose state changed.
@@ -1239,7 +1233,7 @@ function readStoreWithUse<T>(store: ReactStore<T, mixed>): T {
     source,
     root,
     (state: any, prev: any) => readStoreSelection(store, state, root, prev),
-    previous === noEagerSelection ? undefined : (previous as any),
+    previousValue,
     value,
   );
   pushStoreDependency(fiber, root, store, sourceState, value);
@@ -1988,10 +1982,6 @@ function forceStoreRerender(fiber: Fiber) {
   }
 }
 
-function selectState<S>(state: S): S {
-  return state;
-}
-
 function validateStore(store: mixed): void {
   if (
     store === null ||
@@ -1999,7 +1989,7 @@ function validateStore(store: mixed): void {
     store.$$typeof !== REACT_STORE_TYPE
   ) {
     throw new Error(
-      'Expected the first argument to `useStore` to be a store created by ' +
+      'Expected the argument to `use` to be a store created by ' +
         '`createStore`.',
     );
   }
@@ -2058,129 +2048,6 @@ function pushStoreReadCheck<S, T>(
       value,
     );
   }
-}
-
-function mountStore<S, T>(
-  store: ReactStore<S, mixed>,
-  selector?: (state: S, previous: T | void) => T,
-): S | T {
-  const fiber = currentlyRenderingFiber;
-  const root = getWorkInProgressRoot();
-  if (root === null) {
-    throw new Error(
-      'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
-    );
-  }
-  validateStore(store);
-  const hook = mountWorkInProgressHook();
-  const actualSelector: (state: S, previous: T | void) => T =
-    selector === undefined ? (selectState as any) : selector;
-  const state = readStoreForRender(fiber, store, root);
-  const value = actualSelector(state, undefined);
-  pushStoreReadCheck(fiber, store, root, actualSelector, undefined, value);
-  hook.memoizedState = value;
-  const reader: StoreReader<S, T> = {
-    store,
-    root,
-    fiber,
-    selector: actualSelector,
-    value,
-    state,
-    eagerState: noEagerSelection,
-    eagerValue: noEagerSelection,
-  };
-  hook.queue = reader;
-  // Subscribed while committing, so an action dispatched after the commit
-  // reaches the reader in the lane it was dispatched in.
-  mountLayoutEffect(subscribeToReactStore.bind(null, reader), [store]);
-  fiber.flags |= UpdateEffect;
-  pushSimpleEffect(
-    HookHasEffect | HookInsertion,
-    createEffectInstance(),
-    commitStoreReader.bind(null, reader, actualSelector, state, value),
-    null,
-  );
-  return value;
-}
-
-function updateStore<S, T>(
-  store: ReactStore<S, mixed>,
-  selector?: (state: S, previous: T | void) => T,
-): S | T {
-  const fiber = currentlyRenderingFiber;
-  const hook = updateWorkInProgressHook();
-  validateStore(store);
-  let reader: StoreReader<S, T> = hook.queue;
-  const actualSelector: (state: S, previous: T | void) => T =
-    selector === undefined ? (selectState as any) : selector;
-  const isSameStore = reader.store === store;
-  const previous: T | void = isSameStore ? hook.memoizedState : undefined;
-  const state = readStoreForRender(fiber, store, reader.root);
-  const eagerValue = isSameStore
-    ? getEagerStoreSelection(reader, state, actualSelector, previous)
-    : noEagerSelection;
-  const value =
-    eagerValue !== noEagerSelection
-      ? (eagerValue as any)
-      : actualSelector(state, previous);
-  pushStoreReadCheck(
-    fiber,
-    store,
-    reader.root,
-    actualSelector,
-    previous,
-    value,
-  );
-  if (!isSameStore || !is(value, hook.memoizedState)) {
-    hook.memoizedState = value;
-    markWorkInProgressReceivedUpdate();
-  }
-  if (!isSameStore) {
-    reader = {
-      store,
-      root: reader.root,
-      fiber,
-      selector: actualSelector,
-      value,
-      state,
-      eagerState: noEagerSelection,
-      eagerValue: noEagerSelection,
-    };
-    hook.queue = reader;
-  }
-  updateLayoutEffect(subscribeToReactStore.bind(null, reader), [store]);
-  if (reader.selector !== actualSelector || !is(reader.value, value)) {
-    fiber.flags |= UpdateEffect;
-    pushSimpleEffect(
-      HookHasEffect | HookInsertion,
-      createEffectInstance(),
-      commitStoreReader.bind(null, reader, actualSelector, state, value),
-      null,
-    );
-  }
-  return value;
-}
-
-// Before layout effects, so an action dispatched from one is compared with
-// what the reader committed.
-function commitStoreReader<S, T>(
-  reader: StoreReader<S, T>,
-  selector: (state: S, previous: T | void) => T,
-  state: S,
-  value: T,
-): void {
-  reader.selector = selector;
-  reader.state = state;
-  reader.value = value;
-}
-
-function subscribeToReactStore<S, T>(reader: StoreReader<S, T>): () => void {
-  const unsubscribe = subscribeToStoreReader(reader);
-  if (didStoreReaderMissAction(reader)) {
-    // Dispatched between render and now.
-    forceStoreRerender(reader.fiber);
-  }
-  return unsubscribe;
 }
 
 function mountStateImpl<S>(initialState: (() => S) | S): Hook {
@@ -4195,7 +4062,6 @@ export const ContextOnlyDispatcher: Dispatcher = {
   useDeferredValue: throwInvalidHookError,
   useTransition: throwInvalidHookError,
   useSyncExternalStore: throwInvalidHookError,
-  useStore: throwInvalidHookError,
   useId: throwInvalidHookError,
   useHostTransitionStatus: throwInvalidHookError,
   useFormState: throwInvalidHookError,
@@ -4224,7 +4090,6 @@ const HooksDispatcherOnMount: Dispatcher = {
   useDeferredValue: mountDeferredValue,
   useTransition: mountTransition,
   useSyncExternalStore: mountSyncExternalStore,
-  useStore: mountStore,
   useId: mountId,
   useHostTransitionStatus: useHostTransitionStatus,
   useFormState: mountActionState,
@@ -4253,7 +4118,6 @@ const HooksDispatcherOnUpdate: Dispatcher = {
   useDeferredValue: updateDeferredValue,
   useTransition: updateTransition,
   useSyncExternalStore: updateSyncExternalStore,
-  useStore: updateStore,
   useId: updateId,
   useHostTransitionStatus: useHostTransitionStatus,
   useFormState: updateActionState,
@@ -4282,7 +4146,6 @@ const HooksDispatcherOnRerender: Dispatcher = {
   useDeferredValue: rerenderDeferredValue,
   useTransition: rerenderTransition,
   useSyncExternalStore: updateSyncExternalStore,
-  useStore: updateStore,
   useId: updateId,
   useHostTransitionStatus: useHostTransitionStatus,
   useFormState: rerenderActionState,
@@ -4441,14 +4304,6 @@ if (__DEV__) {
       currentHookNameInDev = 'useSyncExternalStore';
       mountHookTypesDev();
       return mountSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-    },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      mountHookTypesDev();
-      return mountStore(store, selector);
     },
     useId(): string {
       currentHookNameInDev = 'useId';
@@ -4614,14 +4469,6 @@ if (__DEV__) {
       updateHookTypesDev();
       return mountSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
     },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      updateHookTypesDev();
-      return mountStore(store, selector);
-    },
     useId(): string {
       currentHookNameInDev = 'useId';
       updateHookTypesDev();
@@ -4786,14 +4633,6 @@ if (__DEV__) {
       updateHookTypesDev();
       return updateSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
     },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      updateHookTypesDev();
-      return updateStore(store, selector);
-    },
     useId(): string {
       currentHookNameInDev = 'useId';
       updateHookTypesDev();
@@ -4957,14 +4796,6 @@ if (__DEV__) {
       currentHookNameInDev = 'useSyncExternalStore';
       updateHookTypesDev();
       return updateSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-    },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      updateHookTypesDev();
-      return updateStore(store, selector);
     },
     useId(): string {
       currentHookNameInDev = 'useId';
@@ -5147,15 +4978,6 @@ if (__DEV__) {
       warnInvalidHookAccess();
       mountHookTypesDev();
       return mountSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-    },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      warnInvalidHookAccess();
-      mountHookTypesDev();
-      return mountStore(store, selector);
     },
     useId(): string {
       currentHookNameInDev = 'useId';
@@ -5346,15 +5168,6 @@ if (__DEV__) {
       updateHookTypesDev();
       return updateSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
     },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      warnInvalidHookAccess();
-      updateHookTypesDev();
-      return updateStore(store, selector);
-    },
     useId(): string {
       currentHookNameInDev = 'useId';
       warnInvalidHookAccess();
@@ -5543,15 +5356,6 @@ if (__DEV__) {
       warnInvalidHookAccess();
       updateHookTypesDev();
       return updateSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-    },
-    useStore<S, T>(
-      store: ReactStore<S, mixed>,
-      selector?: (state: S, previous: T | void) => T,
-    ): S | T {
-      currentHookNameInDev = 'useStore';
-      warnInvalidHookAccess();
-      updateHookTypesDev();
-      return updateStore(store, selector);
     },
     useId(): string {
       currentHookNameInDev = 'useId';
