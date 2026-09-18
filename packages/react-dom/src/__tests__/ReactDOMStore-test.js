@@ -18,6 +18,8 @@ let assertLog;
 let Scheduler;
 let createStore;
 let use;
+let ReactDOMFizzServer;
+let Stream;
 
 describe('ReactDOMUseStore', () => {
   let container;
@@ -27,6 +29,8 @@ describe('ReactDOMUseStore', () => {
     React = require('react');
     ReactDOMClient = require('react-dom/client');
     ReactDOMServer = require('react-dom/server');
+    ReactDOMFizzServer = require('react-dom/server.node');
+    Stream = require('stream');
     Scheduler = require('scheduler');
     createStore = React.createStore;
     use = React.use;
@@ -122,5 +126,45 @@ describe('ReactDOMUseStore', () => {
     assertLog(['state:2', 'selected:2']);
     expect(html).toContain('state:2');
     expect(html).toContain('selected:2');
+  });
+
+  // @gate enableStore
+  it('streams the resolved value of a promise a store holds', async () => {
+    let resolveRows;
+    const rows = new Promise(resolve => {
+      resolveRows = () => resolve('rows!');
+    });
+    const store = createStore(rows);
+    function Rows() {
+      // The promise the store holds, resolved where it is read.
+      return <Text text={use(use(store))} />;
+    }
+    function App() {
+      return (
+        <div>
+          <React.Suspense fallback={<Text text="Loading" />}>
+            <Rows />
+          </React.Suspense>
+        </div>
+      );
+    }
+
+    const writable = new Stream.PassThrough();
+    writable.setEncoding('utf8');
+    let html = '';
+    writable.on('data', chunk => (html += chunk));
+    await act(() => {
+      const {pipe} = ReactDOMFizzServer.renderToPipeableStream(<App />);
+      pipe(writable);
+    });
+    // The shell is sent with the fallback while the promise is pending.
+    assertLog(['Loading']);
+    expect(html).toContain('Loading');
+
+    await act(() => resolveRows());
+    assertLog(['rows!']);
+    // The promise is never serialized; its value is streamed into the HTML.
+    expect(html).toContain('rows!');
+    expect(html).not.toContain('Promise');
   });
 });

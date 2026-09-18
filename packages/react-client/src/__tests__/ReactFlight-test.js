@@ -4463,6 +4463,66 @@ describe('ReactFlight', () => {
   });
 
   // @gate enableStore
+  it('streams a promise a store holds from a server component', async () => {
+    function Rows() {
+      const store = ReactServer.createStore(Promise.resolve('rows!'));
+      // The promise the store holds, resolved before the row is emitted.
+      return <span>{ReactServer.use(ReactServer.use(store))}</span>;
+    }
+    const transport = ReactNoopFlightServer.render(<Rows />);
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+    expect(ReactNoop).toMatchRenderedOutput(<span>rows!</span>);
+  });
+
+  // @gate enableStore
+  it('gives a client component a promise for a store to hold', async () => {
+    function ClientRows({rowsPromise}) {
+      // The client builds a store from what the server sent, without
+      // awaiting it first.
+      const [store] = React.useState(() => React.createStore(rowsPromise));
+      return <span>{React.use(React.use(store))}</span>;
+    }
+    const ClientRowsReference = clientReference(ClientRows);
+    function Server() {
+      // The server does not await it either. The store itself cannot cross:
+      // it holds functions. Its value can.
+      return <ClientRowsReference rowsPromise={Promise.resolve('rows!')} />;
+    }
+
+    const transport = ReactNoopFlightServer.render(<Server />);
+    await act(async () => {
+      ReactNoop.render(
+        <React.Suspense fallback={<span>Loading</span>}>
+          {await ReactNoopFlightClient.read(transport)}
+        </React.Suspense>,
+      );
+    });
+    expect(ReactNoop).toMatchRenderedOutput(<span>rows!</span>);
+  });
+
+  // @gate enableStore
+  it('cannot send a store across the boundary', async () => {
+    function Server() {
+      const store = ReactServer.createStore(0);
+      return <ClientReference store={store} />;
+    }
+    const ClientReference = clientReference(function Client() {
+      return null;
+    });
+    const errors = [];
+    ReactNoopFlightServer.render(<Server />, {
+      onError(error) {
+        errors.push(error.message);
+      },
+    });
+    // One error per function the store holds.
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toContain('Functions cannot be passed directly');
+  });
+
+  // @gate enableStore
   it('reads a store with use() in a server component', async () => {
     function Totals({rows}) {
       const store = ReactServer.createStore(0, (total, row) => total + row);
