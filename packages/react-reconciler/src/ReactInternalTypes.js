@@ -77,13 +77,13 @@ export type ContextDependency<T> = {
 export type StoreDependency = {
   store: ReactStore<any, any>,
   root: FiberRoot,
-  // What this render read.
-  state: any,
+  // What this render read: the state of each store the selection reads.
+  states: Array<any>,
   value: any,
-  // The subscribed reader, and how to release it, from the commit that kept
-  // this read.
+  // The subscribed readers, one per store, and how to release them, from the
+  // commit that kept this read.
   reader: any | null,
-  unsubscribe: (() => void) | null,
+  unsubscribe: Array<() => void> | null,
   next: StoreDependency | null,
 };
 

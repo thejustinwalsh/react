@@ -31,7 +31,7 @@ import {
   isValidElement,
 } from './jsx/ReactJSXElement';
 import {createContext} from './ReactContext';
-import {createStore} from './ReactStore';
+import {createStore, createStoreSelector} from './ReactStore';
 import {lazy} from './ReactLazy';
 import {forwardRef} from './ReactForwardRef';
 import {memo} from './ReactMemo';
@@ -133,6 +133,7 @@ export {
   REACT_OPTIMISTIC_KEY as optimisticKey,
   // enableStore
   createStore,
+  createStoreSelector,
   // DEV-only
   useId,
   act,

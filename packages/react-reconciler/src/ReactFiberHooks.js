@@ -172,7 +172,7 @@ import {
   pushStoreDependency,
   getCommittedStoreDependencyValue,
   getEagerStoreDependencySelection,
-  getStoreSource,
+  getStoreSources,
   readStoreSelection,
 } from './ReactFiberStore';
 
@@ -1208,21 +1208,26 @@ function readStoreWithUse<T>(store: ReactStore<T, mixed>): T {
     );
   }
   validateStore(store);
-  const source = getStoreSource(store);
-  const sourceState = readStoreForRender(fiber, source, root);
+  const sources = getStoreSources(store, []);
+  const states = [];
+  for (let i = 0; i < sources.length; i++) {
+    states.push(readStoreForRender(fiber, sources[i], root));
+  }
+  const readSource = (source: ReactStore<any, any>) =>
+    states[sources.indexOf(source)];
   const previous = getCommittedStoreDependencyValue(fiber, store);
   const previousValue: T | void =
     previous === noEagerSelection ? undefined : (previous as any);
   const eagerValue = getEagerStoreDependencySelection(
     fiber,
     store,
-    sourceState,
+    states,
     previousValue,
   );
   const value =
     eagerValue !== noEagerSelection
       ? (eagerValue as any)
-      : readStoreSelection(store, sourceState, root, previousValue);
+      : readStoreSelection(store, readSource, root, previousValue);
   if (!is(value, previous)) {
     // Reading something other than the last commit did is an update, like a
     // state hook whose state changed.
@@ -1230,13 +1235,24 @@ function readStoreWithUse<T>(store: ReactStore<T, mixed>): T {
   }
   pushStoreReadCheck(
     fiber,
-    source,
+    sources,
     root,
-    (state: any, prev: any) => readStoreSelection(store, state, root, prev),
+    (prev: any) =>
+      readStoreSelection(
+        store,
+        source =>
+          readStoreState(
+            source,
+            root,
+            getWorkInProgressRootEntangledRenderLanes(),
+          ),
+        root,
+        prev,
+      ),
     previousValue,
     value,
   );
-  pushStoreDependency(fiber, root, store, sourceState, value);
+  pushStoreDependency(fiber, root, store, states, value);
   return value;
 }
 
@@ -2026,11 +2042,11 @@ function readStoreForRender<S>(
   return readStoreState(store, root, lanes);
 }
 
-function pushStoreReadCheck<S, T>(
+function pushStoreReadCheck<T>(
   fiber: Fiber,
-  store: ReactStore<S, mixed>,
+  sources: Array<ReactStore<any, any>>,
   root: FiberRoot,
-  selector: (state: S, previous: T | void) => T,
+  read: (previous: T | void) => T,
   previous: T | void,
   value: T,
 ): void {
@@ -2042,11 +2058,7 @@ function pushStoreReadCheck<S, T>(
   ) {
     // An action dispatched during a concurrent render can change what the
     // rest of the render reads.
-    pushStoreConsistencyCheck(
-      fiber,
-      () => selector(readStoreState(store, root, lanes), previous),
-      value,
-    );
+    pushStoreConsistencyCheck(fiber, () => read(previous), value);
   }
 }
 

@@ -22,6 +22,7 @@ export {
   createElement,
   createRef,
   createStore,
+  createStoreSelector,
   use,
   forwardRef,
   isValidElement,

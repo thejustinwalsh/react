@@ -253,10 +253,9 @@ function requestStoreUpdateLane(): Lane {
 
 function isSameSelection<S, T>(reader: StoreReader<S, T>, state: S): boolean {
   try {
-    const selection = reader.selector(state, reader.value);
-    reader.eagerState = state;
-    reader.eagerValue = selection;
-    return is(selection, reader.value);
+    // The selector records what it read, so the render this dispatch
+    // schedules can reuse it.
+    return is(reader.selector(state, reader.value), reader.value);
   } catch (error) {
     // Render throws it.
     reader.eagerState = noEagerSelection;
@@ -270,18 +269,23 @@ function isSameSelection<S, T>(reader: StoreReader<S, T>, state: S): boolean {
 // the same thing.
 export function getEagerStoreSelection<S, T>(
   reader: StoreReader<S, T>,
-  state: S,
-  selector: (state: S, previous: T | void) => T,
+  states: Array<any>,
   previous: T | void,
 ): T | typeof noEagerSelection {
   const eagerValue = reader.eagerValue;
+  const eagerStates: any = reader.eagerState;
   if (
     eagerValue === noEagerSelection ||
-    reader.selector !== selector ||
-    reader.eagerState !== state ||
-    previous !== reader.value
+    eagerStates === noEagerSelection ||
+    previous !== reader.value ||
+    eagerStates.length !== states.length
   ) {
     return noEagerSelection;
+  }
+  for (let i = 0; i < states.length; i++) {
+    if (!is(eagerStates[i], states[i])) {
+      return noEagerSelection;
+    }
   }
   reader.eagerState = noEagerSelection;
   reader.eagerValue = noEagerSelection;
@@ -641,15 +645,23 @@ const committedSelections: WeakMap<
   WeakMap<FiberRoot, {value: any}>,
 > = new WeakMap();
 
-// The store a selection is selected from.
-export function getStoreSource<S>(
+// The stores a selection is selected from, and the stores those came from,
+// down to the ones that are dispatched to.
+export function getStoreSources<S>(
   store: ReactStore<S, mixed>,
-): ReactStore<any, any> {
-  let source: ReactStore<any, any> = store;
-  while (source._parent != null) {
-    source = source._parent;
+  sources: Array<ReactStore<any, any>>,
+): Array<ReactStore<any, any>> {
+  const selected = store._sources;
+  if (selected == null) {
+    if (sources.indexOf(store) === -1) {
+      sources.push(store);
+    }
+    return sources;
   }
-  return source;
+  for (let i = 0; i < selected.length; i++) {
+    getStoreSources(selected[i], sources);
+  }
+  return sources;
 }
 
 function getCommittedSelection<S>(
@@ -682,41 +694,48 @@ function commitSelection<S>(
   }
 }
 
-// A selection's value for a root, from the state of the store it was selected
+// A selection's value for a root, from the state of each store it was selected
 // from. Each select function is given what it returned for this root before.
-export function readStoreSelection<S, T>(
+export function readStoreSelection<T>(
   selection: ReactStore<T, mixed>,
-  sourceState: S,
+  readSource: (source: ReactStore<any, any>) => any,
   root: FiberRoot,
   previous: T | void,
 ): T {
-  const parent = selection._parent;
-  if (parent == null) {
-    return sourceState as any;
+  const sources = selection._sources;
+  if (sources == null) {
+    return readSource(selection);
   }
-  const parentState = readStoreSelection(
-    parent,
-    sourceState,
-    root,
-    getCommittedSelection(parent, root),
-  );
-  const select: (state: any, previous: T | void) => T = selection._select as any;
-  return select(parentState, previous);
+  const states = [];
+  for (let i = 0; i < sources.length; i++) {
+    const source = sources[i];
+    states.push(
+      readStoreSelection(
+        source,
+        readSource,
+        root,
+        getCommittedSelection(source, root),
+      ),
+    );
+  }
+  const select: (states: Array<any>, previous: T | void) => T =
+    selection._select as any;
+  return select(states, previous);
 }
 
 // A store read with use() is recorded on the fiber, like a context, so it can
 // be read in a condition or a loop. The commit subscribes it.
-export function pushStoreDependency<S, T>(
+export function pushStoreDependency<T>(
   fiber: Fiber,
   root: FiberRoot,
   store: ReactStore<T, mixed>,
-  state: S,
+  states: Array<any>,
   value: T,
 ): void {
   const dependency: StoreDependency = {
     store,
     root,
-    state,
+    states,
     value,
     reader: null,
     unsubscribe: null,
@@ -768,7 +787,7 @@ export function getCommittedStoreDependencyValue<T>(
     index++;
     read = read.next;
   }
-  const source = getStoreSource(store);
+  const sources = getStoreSources(store, []);
   let atIndex: StoreDependency | null = null;
   let position = 0;
   let dependency: StoreDependency | null = first;
@@ -782,19 +801,25 @@ export function getCommittedStoreDependencyValue<T>(
     position++;
     dependency = dependency.next;
   }
-  if (atIndex !== null && getStoreSource(atIndex.store) === source) {
-    // The same read, of the same store, through a selection it replaced.
-    return atIndex.value;
+  if (atIndex !== null) {
+    const other = getStoreSources(atIndex.store, []);
+    if (
+      other.length === sources.length &&
+      other.every((each, i) => each === sources[i])
+    ) {
+      // The same read, of the same stores, through a selection it replaced.
+      return atIndex.value;
+    }
   }
   return noEagerSelection;
 }
 
 // What the selection returned when an action was dispatched, if this render
 // reads the same state. Selecting again would return the same thing.
-export function getEagerStoreDependencySelection<S, T>(
+export function getEagerStoreDependencySelection<T>(
   fiber: Fiber,
   selection: ReactStore<T, mixed>,
-  sourceState: S,
+  sourceStates: Array<any>,
   previous: T | void,
 ): T | typeof noEagerSelection {
   const current = fiber.alternate;
@@ -805,10 +830,18 @@ export function getEagerStoreDependencySelection<S, T>(
     current.dependencies.firstStore ?? null;
   while (dependency !== null) {
     if (dependency.store === selection) {
-      const reader = dependency.reader;
-      return reader === null
-        ? noEagerSelection
-        : getEagerStoreSelection(reader, sourceState, reader.selector, previous);
+      const readers: Array<StoreReader<any, any>> | null =
+        dependency.reader as any;
+      if (readers === null) {
+        return noEagerSelection;
+      }
+      for (let i = 0; i < readers.length; i++) {
+        const eager = getEagerStoreSelection(readers[i], sourceStates, previous);
+        if (eager !== noEagerSelection) {
+          return eager;
+        }
+      }
+      return noEagerSelection;
     }
     dependency = dependency.next;
   }
@@ -848,11 +881,14 @@ export function commitStoreDependencies(
   while (dependency !== null) {
     const kept = takeStoreDependency(previous, dependency.store);
     if (kept !== null) {
-      const reader: StoreReader<any, any> = kept.reader as any;
-      reader.fiber = finishedWork;
-      reader.state = dependency.state;
-      reader.value = dependency.value;
-      dependency.reader = reader;
+      const readers: Array<StoreReader<any, any>> = kept.reader as any;
+      for (let i = 0; i < readers.length; i++) {
+        const reader = readers[i];
+        reader.fiber = finishedWork;
+        reader.state = dependency.states[i];
+        reader.value = dependency.value;
+      }
+      dependency.reader = readers;
       dependency.unsubscribe = kept.unsubscribe;
       kept.reader = null;
       kept.unsubscribe = null;
@@ -870,11 +906,13 @@ export function commitStoreDependencies(
 }
 
 function releaseStoreDependency(dependency: StoreDependency): void {
-  const unsubscribe = dependency.unsubscribe;
-  if (unsubscribe !== null) {
+  const unsubscribes = dependency.unsubscribe;
+  if (unsubscribes !== null) {
     dependency.reader = null;
     dependency.unsubscribe = null;
-    unsubscribe();
+    for (let i = 0; i < unsubscribes.length; i++) {
+      unsubscribes[i]();
+    }
   }
 }
 
@@ -884,24 +922,55 @@ function subscribeStoreDependency(
 ): void {
   const selection = dependency.store;
   const root = dependency.root;
-  const reader: StoreReader<any, any> = {
-    store: getStoreSource(selection),
-    root,
-    fiber,
-    selector: (state: any, previous: any) =>
-      readStoreSelection(selection, state, root, previous),
-    value: dependency.value,
-    state: dependency.state,
-    eagerState: noEagerSelection,
-    eagerValue: noEagerSelection,
-  };
-  dependency.reader = reader;
-  dependency.unsubscribe = subscribeToStoreReader(reader);
-  if (didStoreReaderMissAction(reader)) {
-    // Dispatched between the render and now.
-    const scheduledRoot = enqueueConcurrentRenderForLane(fiber, SyncLane);
-    if (scheduledRoot !== null) {
-      scheduleUpdateOnFiber(scheduledRoot, fiber, SyncLane);
+  const sources = getStoreSources(selection, []);
+  const readers = [];
+  const unsubscribes = [];
+  for (let i = 0; i < sources.length; i++) {
+    const source = sources[i];
+    const reader: StoreReader<any, any> = {
+      store: source,
+      root,
+      fiber,
+      // The state of the store this reader subscribes to comes from the
+      // action; the other stores are read at what the root shows. What it read
+      // is kept, so the render this dispatch schedules can reuse the value.
+      selector: (state: any, previous: any) => {
+        const states = [];
+        for (let each = 0; each < sources.length; each++) {
+          states.push(
+            sources[each] === source
+              ? state
+              : readStoreState(sources[each], root, NoLanes),
+          );
+        }
+        const value = readStoreSelection(
+          selection,
+          each => states[sources.indexOf(each)],
+          root,
+          previous,
+        );
+        reader.eagerState = states;
+        reader.eagerValue = value;
+        return value;
+      },
+      value: dependency.value,
+      state: dependency.states[i],
+      eagerState: noEagerSelection,
+      eagerValue: noEagerSelection,
+    };
+    readers.push(reader);
+    unsubscribes.push(subscribeToStoreReader(reader));
+  }
+  dependency.reader = readers;
+  dependency.unsubscribe = unsubscribes;
+  for (let i = 0; i < readers.length; i++) {
+    if (didStoreReaderMissAction(readers[i])) {
+      // Dispatched between the render and now.
+      const scheduledRoot = enqueueConcurrentRenderForLane(fiber, SyncLane);
+      if (scheduledRoot !== null) {
+        scheduleUpdateOnFiber(scheduledRoot, fiber, SyncLane);
+      }
+      break;
     }
   }
 }

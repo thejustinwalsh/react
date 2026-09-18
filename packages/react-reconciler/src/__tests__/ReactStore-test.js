@@ -15,6 +15,7 @@ let Scheduler;
 let act;
 let assertLog;
 let createStore;
+let createStoreSelector;
 let useState;
 let startTransition;
 let use;
@@ -32,6 +33,7 @@ describe('createStore and use', () => {
     ReactNoop = require('react-noop-renderer');
     Scheduler = require('scheduler');
     createStore = React.createStore;
+    createStoreSelector = React.createStoreSelector;
     use = React.use;
     useState = React.useState;
     startTransition = React.startTransition;
@@ -43,6 +45,41 @@ describe('createStore and use', () => {
     act = InternalTestUtils.act;
     assertLog = InternalTestUtils.assertLog;
   });
+
+  const textCache = new Map();
+  function resolveText(text) {
+    const record = textCache.get(text);
+    if (record === undefined) {
+      textCache.set(text, {status: 'resolved', value: text});
+    } else if (record.status === 'pending') {
+      const thenable = record.value;
+      record.status = 'resolved';
+      record.value = text;
+      thenable.pings.forEach(t => t());
+    }
+  }
+  function readText(text) {
+    const record = textCache.get(text);
+    if (record !== undefined) {
+      if (record.status === 'pending') {
+        throw record.value;
+      }
+      return record.value;
+    }
+    const thenable = {
+      pings: [],
+      then(resolve) {
+        if (newRecord.status === 'pending') {
+          thenable.pings.push(resolve);
+        } else {
+          Promise.resolve().then(() => resolve(newRecord.value));
+        }
+      },
+    };
+    const newRecord = {status: 'pending', value: thenable};
+    textCache.set(text, newRecord);
+    throw thenable;
+  }
 
   function Text({text}) {
     Scheduler.log(text);
@@ -802,5 +839,137 @@ describe('createStore and use', () => {
     await act(() => store.dispatch(state => ({...state, ids: [1, 2, 3]})));
     assertLog(['1,2,3']);
     expect(selections[2]).not.toBe(selections[1]);
+  });
+
+  // @gate enableStore
+  it('reads a selection of two stores', async () => {
+    const price = createStore(2);
+    const quantity = createStore(3);
+    const total = createStoreSelector([price, quantity], ([p, q]) => p * q);
+    let renders = 0;
+    function App() {
+      renders++;
+      return <Text text={'total:' + use(total)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['total:6']);
+    expect(total.getState()).toBe(6);
+
+    await act(() => price.dispatch(4));
+    assertLog(['total:12']);
+
+    await act(() => quantity.dispatch(1));
+    assertLog(['total:4']);
+    expect(renders).toBe(3);
+
+    // Neither source changed what it selects.
+    await act(() => price.dispatch(4));
+    assertLog([]);
+    expect(renders).toBe(3);
+  });
+
+  // @gate enableStore
+  it('commits a Transition that dispatches to both stores of a selection', async () => {
+    const price = createStore(2);
+    const quantity = createStore(3);
+    const total = createStoreSelector([price, quantity], ([p, q]) => p * q);
+    function App() {
+      const value = use(total);
+      if (value >= 20) {
+        readText('big');
+      }
+      return <Text text={'total:' + value} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <Suspense fallback={<Text text="Loading" />}>
+          <App />
+        </Suspense>,
+      ),
+    );
+    assertLog(['total:6']);
+
+    // Both dispatches share the Transition, so the selection never sees one
+    // without the other.
+    await act(() =>
+      startTransition(() => {
+        price.dispatch(5);
+        quantity.dispatch(5);
+      }),
+    );
+    assertLog(['Loading']);
+    expect(root).toMatchRenderedOutput('total:6');
+
+    await act(() => resolveText('big'));
+    assertLog(['total:25']);
+    expect(root).toMatchRenderedOutput('total:25');
+  });
+
+  // @gate enableStore
+  it('rebases a blocking dispatch to one store over a pending Transition in another', async () => {
+    const page = createStore('home');
+    const count = createStore(0);
+    const label = createStoreSelector(
+      [page, count],
+      ([currentPage, n]) => currentPage + ':' + n,
+    );
+    function Page() {
+      const current = use(page);
+      if (current !== 'home') {
+        readText(current);
+      }
+      return <Text text={use(label)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <Suspense fallback={<Text text="Loading" />}>
+          <Page />
+        </Suspense>,
+      ),
+    );
+    assertLog(['home:0']);
+
+    await act(() =>
+      startTransition(() => {
+        page.dispatch('about');
+        count.dispatch(10);
+      }),
+    );
+    assertLog(['Loading']);
+    expect(root).toMatchRenderedOutput('home:0');
+
+    // Lands on what is on screen, rebased over the Transition neither store
+    // has committed.
+    await act(() => count.dispatch(n => n + 1));
+    assertLog(['home:1', 'Loading']);
+    expect(root).toMatchRenderedOutput('home:1');
+
+    await act(() => resolveText('about'));
+    assertLog(['about:11']);
+    expect(root).toMatchRenderedOutput('about:11');
+  });
+
+  // @gate enableStore
+  it('refines a selection of two stores', async () => {
+    const a = createStore({n: 1});
+    const b = createStore({n: 2});
+    const pair = createStoreSelector([a, b], ([first, second]) => ({
+      sum: first.n + second.n,
+      first: first.n,
+    }));
+    const sum = pair.select(value => value.sum);
+    function App() {
+      return <Text text={'sum:' + use(sum)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['sum:3']);
+
+    await act(() => b.dispatch({n: 5}));
+    assertLog(['sum:6']);
+    expect(root).toMatchRenderedOutput('sum:6');
   });
 });
