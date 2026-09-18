@@ -18,6 +18,7 @@ let assertLog;
 let Scheduler;
 let createStore;
 let useStore;
+let use;
 
 describe('ReactDOMUseStore', () => {
   let container;
@@ -30,6 +31,7 @@ describe('ReactDOMUseStore', () => {
     Scheduler = require('scheduler');
     createStore = React.createStore;
     useStore = React.useStore;
+    use = React.use;
     const InternalTestUtils = require('internal-test-utils');
     act = InternalTestUtils.act;
     assertLog = InternalTestUtils.assertLog;
@@ -99,5 +101,26 @@ describe('ReactDOMUseStore', () => {
     expect(errors).toEqual([]);
     expect(container.firstChild).toBe(span);
     expect(container.textContent).toBe('count:6');
+  });
+
+  // @gate enableStore
+  it('renders a store read with use() on the server, and a selection of one', async () => {
+    const store = createStore({count: 2}, (state, by) => ({
+      count: state.count + by,
+    }));
+    const count = store.select(state => state.count);
+    function App() {
+      return (
+        <div>
+          <Text text={'state:' + use(store).count} />
+          <Text text={'selected:' + use(count)} />
+        </div>
+      );
+    }
+
+    const html = ReactDOMServer.renderToString(<App />);
+    assertLog(['state:2', 'selected:2']);
+    expect(html).toContain('state:2');
+    expect(html).toContain('selected:2');
   });
 });
