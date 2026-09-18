@@ -745,7 +745,9 @@ export function pushStoreDependency<S, T>(
   fiber.flags |= Update;
 }
 
-// What the fiber's last committed render read from this store, if it read it.
+// What the fiber's last committed render read here. A read that selects the
+// same store again is given what it rendered, even when the selection is new,
+// so a selection built during render can still share structure with it.
 export function getCommittedStoreDependencyValue<T>(
   fiber: Fiber,
   store: ReactStore<T, mixed>,
@@ -754,13 +756,35 @@ export function getCommittedStoreDependencyValue<T>(
   if (current === null || current.dependencies == null) {
     return noEagerSelection;
   }
-  let dependency: StoreDependency | null =
-    current.dependencies.firstStore ?? null;
+  const first: StoreDependency | null = current.dependencies.firstStore ?? null;
+  if (first === null) {
+    return noEagerSelection;
+  }
+  // The position this read takes in the list.
+  let index = 0;
+  let read: StoreDependency | null =
+    fiber.dependencies == null ? null : (fiber.dependencies.firstStore ?? null);
+  while (read !== null) {
+    index++;
+    read = read.next;
+  }
+  const source = getStoreSource(store);
+  let atIndex: StoreDependency | null = null;
+  let position = 0;
+  let dependency: StoreDependency | null = first;
   while (dependency !== null) {
     if (dependency.store === store) {
       return dependency.value;
     }
+    if (position === index) {
+      atIndex = dependency;
+    }
+    position++;
     dependency = dependency.next;
+  }
+  if (atIndex !== null && getStoreSource(atIndex.store) === source) {
+    // The same read, of the same store, through a selection it replaced.
+    return atIndex.value;
   }
   return noEagerSelection;
 }

@@ -755,4 +755,52 @@ describe('createStore and use', () => {
         'was selected from.',
     );
   });
+
+  // @gate enableStore
+  it('gives a new selection at the same read the value that read committed', async () => {
+    const store = createStore({ids: [1, 2], other: 0});
+    const sameIds = (previous, next) =>
+      previous !== undefined &&
+      previous.length === next.length &&
+      previous.every((id, i) => id === next[i]);
+    const selections = [];
+    function App() {
+      // A new selection every render, like a binding given an inline selector.
+      const ids = use(
+        store.select((state, previous) =>
+          sameIds(previous, state.ids) ? previous : state.ids.slice(),
+        ),
+      );
+      selections.push(ids);
+      return <Text text={ids.join(',')} />;
+    }
+    let setLabel;
+    function Wrapper() {
+      const [label, _setLabel] = useState('a');
+      setLabel = _setLabel;
+      return (
+        <>
+          <Text text={label} />
+          <App />
+        </>
+      );
+    }
+
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<Wrapper />));
+    assertLog(['a', '1,2']);
+    expect(selections.length).toBe(1);
+
+    // The parent renders again, so the reader gets a new selection. It keeps
+    // the identity it rendered, because the previous value comes from the read.
+    await act(() => setLabel('b'));
+    assertLog(['b', '1,2']);
+    expect(selections.length).toBe(2);
+    expect(selections[1]).toBe(selections[0]);
+
+    // A change the selection covers is a new array.
+    await act(() => store.dispatch(state => ({...state, ids: [1, 2, 3]})));
+    assertLog(['1,2,3']);
+    expect(selections[2]).not.toBe(selections[1]);
+  });
 });
