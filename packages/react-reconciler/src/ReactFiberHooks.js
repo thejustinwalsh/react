@@ -1184,6 +1184,22 @@ function use<T>(usable: Usable<T>): T {
     } else if (usable.$$typeof === REACT_CONTEXT_TYPE) {
       const context: ReactContext<T> = usable as any;
       return readContext(context);
+    } else if (enableStore && usable.$$typeof === REACT_STORE_TYPE) {
+      const store: ReactStore<T, mixed> = usable as any;
+      // The dispatcher knows whether this is a mount or an update.
+      const dispatcher: Dispatcher = ReactSharedInternals.H as any;
+      const state: mixed = dispatcher.useStore(store);
+      if (
+        state !== null &&
+        typeof state === 'object' &&
+        // $FlowFixMe[method-unbinding]
+        typeof state.then === 'function'
+      ) {
+        // A store of a promise resolves like any other usable.
+        const thenable: Thenable<T> = state as any;
+        return useThenable(thenable);
+      }
+      return state as any;
     }
   }
 

@@ -18,6 +18,9 @@ let createStore;
 let useStore;
 let useState;
 let startTransition;
+let use;
+let Suspense;
+let promises;
 
 describe('useStore', () => {
   beforeEach(() => {
@@ -33,6 +36,9 @@ describe('useStore', () => {
     useStore = React.useStore;
     useState = React.useState;
     startTransition = React.startTransition;
+    use = React.use;
+    Suspense = React.Suspense;
+    promises = new Map();
 
     const InternalTestUtils = require('internal-test-utils');
     act = InternalTestUtils.act;
@@ -42,6 +48,19 @@ describe('useStore', () => {
   function Text({text}) {
     Scheduler.log(text);
     return text;
+  }
+
+  function getPromise(text) {
+    let resolve;
+    const promise = new Promise(r => (resolve = r));
+    promises.set(text, () => resolve(text));
+    return promise;
+  }
+  function resolvePromise(text) {
+    const resolve = promises.get(text);
+    if (resolve !== undefined) {
+      resolve();
+    }
   }
 
   // @gate enableStore
@@ -486,5 +505,60 @@ describe('useStore', () => {
         'handler or an effect instead.',
     ]);
     expect(store.getState()).toBe(0);
+  });
+
+  // @gate enableStore
+  it('reads a store with use()', async () => {
+    const store = createStore(0, (n, by) => n + by);
+    function App({show}) {
+      return <Text text={'n' + (show ? use(store) : '-')} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App show={true} />));
+    assertLog(['n0']);
+
+    await act(() => store.dispatch(1));
+    assertLog(['n1']);
+    expect(root).toMatchRenderedOutput('n1');
+
+    await act(() => startTransition(() => store.dispatch(10)));
+    assertLog(['n11']);
+    expect(root).toMatchRenderedOutput('n11');
+  });
+
+  // @gate enableStore
+  it('suspends on a store whose state is a promise, and resolves it with use()', async () => {
+    const store = createStore(getPromise('first'));
+    function App() {
+      return <Text text={use(store)} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() =>
+      root.render(
+        <Suspense fallback={<Text text="Loading" />}>
+          <App />
+        </Suspense>,
+      ),
+    );
+    assertLog(['Loading']);
+    expect(root).toMatchRenderedOutput('Loading');
+
+    await act(() => resolvePromise('first'));
+    assertLog(['first']);
+    expect(root).toMatchRenderedOutput('first');
+
+    // A new promise in the store suspends again, in a Transition without a
+    // fallback.
+    await act(() =>
+      startTransition(() => store.dispatch(getPromise('second'))),
+    );
+    assertLog(['Loading']);
+    // A Transition keeps the resolved value on screen while the new promise
+    // is pending.
+    expect(root).toMatchRenderedOutput('first');
+
+    await act(() => resolvePromise('second'));
+    assertLog(['second']);
+    expect(root).toMatchRenderedOutput('second');
   });
 });
