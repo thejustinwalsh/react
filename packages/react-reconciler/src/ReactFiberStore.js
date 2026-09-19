@@ -916,6 +916,47 @@ function releaseStoreDependency(dependency: StoreDependency): void {
   }
 }
 
+// One reader per source of the selection. The state of the store the reader
+// subscribes to comes from the action; the other stores are read at what the
+// root shows. What it read is kept, so the render the dispatch schedules can
+// reuse the value.
+function createStoreReader(
+  selection: ReactStore<any, any>,
+  sources: Array<ReactStore<any, any>>,
+  index: number,
+  root: FiberRoot,
+  fiber: Fiber,
+  dependency: StoreDependency,
+): StoreReader<any, any> {
+  const reader: StoreReader<any, any> = {
+    store: sources[index],
+    root,
+    fiber,
+    selector: (state: any, previous: any) => {
+      const states = [];
+      for (let each = 0; each < sources.length; each++) {
+        states.push(
+          each === index ? state : readStoreState(sources[each], root, NoLanes),
+        );
+      }
+      const value = readStoreSelection(
+        selection,
+        each => states[sources.indexOf(each)],
+        root,
+        previous,
+      );
+      reader.eagerState = states;
+      reader.eagerValue = value;
+      return value;
+    },
+    value: dependency.value,
+    state: dependency.states[index],
+    eagerState: noEagerSelection,
+    eagerValue: noEagerSelection,
+  };
+  return reader;
+}
+
 function subscribeStoreDependency(
   fiber: Fiber,
   dependency: StoreDependency,
@@ -926,38 +967,14 @@ function subscribeStoreDependency(
   const readers = [];
   const unsubscribes = [];
   for (let i = 0; i < sources.length; i++) {
-    const source = sources[i];
-    const reader: StoreReader<any, any> = {
-      store: source,
+    const reader = createStoreReader(
+      selection,
+      sources,
+      i,
       root,
       fiber,
-      // The state of the store this reader subscribes to comes from the
-      // action; the other stores are read at what the root shows. What it read
-      // is kept, so the render this dispatch schedules can reuse the value.
-      selector: (state: any, previous: any) => {
-        const states = [];
-        for (let each = 0; each < sources.length; each++) {
-          states.push(
-            sources[each] === source
-              ? state
-              : readStoreState(sources[each], root, NoLanes),
-          );
-        }
-        const value = readStoreSelection(
-          selection,
-          each => states[sources.indexOf(each)],
-          root,
-          previous,
-        );
-        reader.eagerState = states;
-        reader.eagerValue = value;
-        return value;
-      },
-      value: dependency.value,
-      state: dependency.states[i],
-      eagerState: noEagerSelection,
-      eagerValue: noEagerSelection,
-    };
+      dependency,
+    );
     readers.push(reader);
     unsubscribes.push(subscribeToStoreReader(reader));
   }
